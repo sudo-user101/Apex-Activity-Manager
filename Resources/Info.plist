@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key><string>en</string>
+    <key>CFBundleDisplayName</key><string>Apex Activity Manager</string>
+    <key>CFBundleExecutable</key><string>TaskManager</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
+    <key>CFBundleIdentifier</key><string>com.taskmanager.mac.native</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+    <key>NSLocalNetworkUsageDescription</key>
+	<string>Apex asks your router for its name and model (UPnP) to show on the Network page. Nothing leaves your network.</string>
+	<key>CFBundleName</key><string>Apex Activity Manager</string>
+    <key>NSHumanReadableCopyright</key><string>© 2026 CyberNet Labs. All rights reserved.</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>1.0.0</string>
+    <key>CFBundleVersion</key><string>1</string>
+    <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
+    <key>LSMinimumSystemVersion</key><string>14.0</string>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>NSSupportsAutomaticTermination</key><false/>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Apex Activity Manager uses the standard administrator prompt to end or reprioritise processes owned by other users.</string>
+</dict>
+</plist>
