@@ -178,6 +178,14 @@ This is how macOS itself counts memory.
 | Users | `utmpx` login sessions; names via `getpwuid` |
 | Local AI | Known runtimes by process, plus their local APIs: Ollama `:11434`, LM Studio `:1234` |
 
+## Startup
+
+| Value | Source |
+|---|---|
+| Login agents / daemons | Plists in `~/Library/LaunchAgents`, `/Library/LaunchAgents`, `/Library/LaunchDaemons`; enabled state from launchd overrides |
+| Opens at Login, Allowed in Background | `sfltool dumpbtm` (records for this user and UID 0): `Type` app + `[enabled` = opens at login; `login item` / `agent` / `daemon` = background items, named after their `Parent Identifier` app; `legacy` types skipped (already from plists) |
+| Open at Login on/off | System Events `make` / `delete login item` (Automation permission) |
+
 ## Detection engine inputs
 
 `Alerts.sample(_:)` turns each live snapshot into a `DetectionSample`: per-app

@@ -234,6 +234,12 @@ struct StorageDeviceDetail: View {
         .onAppear {
             // APEX_OPEN_DRIVE_TOOLS=1 opens the window straight away (for checking the layout).
             if ProcessInfo.processInfo.environment["APEX_OPEN_DRIVE_TOOLS"] == "1", tools == nil { tools = true }
+            // APEX_OPEN=doctor|creator opens Drive Doctor or the Bootable Media Creator.
+            switch ProcessInfo.processInfo.environment["APEX_OPEN"] {
+            case "doctor": showDoctor = true
+            case "creator": if tools == nil { tools = true }
+            default: break
+            }
         }
     }
 

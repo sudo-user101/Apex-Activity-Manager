@@ -51,17 +51,26 @@ struct StartupView: View {
                     Text(item.statusText)
                 }
                 .toggleStyle(.switch).controlSize(.mini)
-                .disabled(busy.contains(item.id))
+                // macOS only lets System Settings switch other apps' background items.
+                .disabled(busy.contains(item.id) || item.scope == .background)
+                .help(item.scope == .background ? "macOS only allows changing this in System Settings › General › Login Items (right-click › Login Items Settings)." : "")
             }
             .width(min: 120, ideal: 140)
         }
         .contextMenu(forSelectionType: String.self) { ids in
             if let item = items.first(where: { ids.contains($0.id) }) {
-                Button(item.enabled ? "Disable" : "Enable") { toggle(item, !item.enabled) }
+                if item.scope != .background {
+                    Button(item.scope == .openAtLogin ? "Don’t Open at Login" : (item.enabled ? "Disable" : "Enable")) { toggle(item, !item.enabled) }
+                }
+                if item.fromLoginItems {
+                    Button("Login Items Settings…") { openLoginItems() }
+                }
                 if item.addedByTaskManager {
                     Button("Remove from Login") { remove(item) }
                 }
-                Button("Show Property List in Finder") { ProcessActions.reveal(path: item.plistPath) }
+                if !item.fromLoginItems {
+                    Button("Show Property List in Finder") { ProcessActions.reveal(path: item.plistPath) }
+                }
                 if !item.program.isEmpty, FileManager.default.fileExists(atPath: item.program) {
                     Button("Show Program in Finder") { ProcessActions.reveal(path: item.program) }
                 }
@@ -101,17 +110,31 @@ struct StartupView: View {
         return ("Low", .green, detail)
     }
 
+    /// Plist items first (instant), then macOS's own Login Items list (~4 s).
     private func load() async {
         loading = items.isEmpty
-        items = await Task.detached(priority: .userInitiated) { StartupItems.load() }.value
-        StartupCache.items = items
+        let plists = await Task.detached(priority: .userInitiated) { StartupItems.load() }.value
+        let previous = items.filter(\.fromLoginItems)
+        items = plists + previous
         loading = false
+        let running = Dictionary(NSWorkspace.shared.runningApplications.compactMap { a in a.bundleIdentifier.map { ($0, a.processIdentifier) } },
+                                 uniquingKeysWith: { a, _ in a })
+        let records = await Task.detached(priority: .utility) { BackgroundItems.read() }.value
+        let extra = BackgroundItems.startupItems(records, runningApps: running)
+            .filter { e in !plists.contains { $0.label == e.label } }
+        items = plists + extra
+        StartupCache.items = items
     }
 
     private func toggle(_ item: StartupItem, _ on: Bool) {
+        guard item.scope != .background else { openLoginItems(); return }
         busy.insert(item.id)
         Task {
-            let err = await Task.detached { Launchd.setEnabled(on, label: item.label, systemDomain: item.isDaemon) }.value
+            let err = await Task.detached {
+                item.scope == .openAtLogin
+                    ? BackgroundItems.setOpenAtLogin(on, name: item.displayName, path: item.program)
+                    : Launchd.setEnabled(on, label: item.label, systemDomain: item.isDaemon)
+            }.value
             busy.remove(item.id)
             if let err, err != "Cancelled" { error = err }
             if err == nil, let i = items.firstIndex(where: { $0.id == item.id }) { items[i].enabled = on; StartupCache.items = items }

@@ -172,10 +172,20 @@ verification afterwards.
   <img src="docs/images/history.png" alt="History: events such as CPU spikes, swap growth and drive health, each with an explanation" />
 </p>
 
+### Startup, the whole picture
+
+- Everything that starts automatically in one list: apps that open at login,
+  background items apps registered with macOS, and launch agents and
+  daemons, with readable names, icons, what each costs while running, and
+  on/off where macOS allows it.
+- Add App to open any app at login.
+
+<p align="center">
+  <img src="docs/images/startup.png" alt="Startup: open-at-login apps, background items, launch agents and daemons with their impact" />
+</p>
+
 ### And more
 
-- **Startup:** launch agents and login items with readable names, on/off,
-  and Add App to open any app at login.
 - **Users** and **Services** (start, stop, restart), **Local AI** runtimes
   (Ollama, LM Studio, llama.cpp and more) with their models and memory, and
   a **menu bar** monitor.

@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Startup lists everything macOS starts automatically: apps that open at
+  login and background items apps registered, next to launch agents and daemons.
+
 ## 1.0.0 (2026-10-24): first public release
 
 - Processes, Performance (CPU, Memory, Disk, Network, GPU, Energy, Sensors),

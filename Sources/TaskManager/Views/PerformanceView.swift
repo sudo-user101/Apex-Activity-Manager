@@ -222,6 +222,10 @@ private struct ResourceDetail: View {
         let s = model.snapshot.system, h = model.history
         VStack(alignment: .leading, spacing: 16) {
             PageHeader(title: resource.title, subtitle: subtitle(s), accessory: headerAccessory)
+                .onAppear {
+                    // APEX_OPEN=doctor on the Disk page opens Drive Doctor for the startup drive.
+                    if resource == .disk, ProcessInfo.processInfo.environment["APEX_OPEN"] == "doctor" { showDoctor = true }
+                }
                 .sheet(isPresented: $showDoctor) {
                     DriveDoctorView(title: s.disk.volumeName, record: DriveHealthStore.shared.startup, usb: nil,
                                     capacity: s.disk.capacity, available: s.disk.available,

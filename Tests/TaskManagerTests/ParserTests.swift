@@ -98,3 +98,72 @@ final class StartTimeTests: XCTestCase {
         XCTAssertLessThanOrEqual(Double(t), Date().timeIntervalSince1970)
     }
 }
+
+final class BackgroundItemsTests: XCTestCase {
+    let dump = """
+    ========================
+     Records for UID 502 : X
+    ========================
+     Items:
+     #1:
+                     Name: Other
+                     Type: app (0x2)
+              Disposition: [enabled, allowed, visible, notified] (0xb)
+               Identifier: 2.com.other
+                      URL: file:///Applications/Other.app/
+    ========================
+     Records for UID 501 : Y
+    ========================
+     Items:
+     #1:
+                     Name: CopyClip
+           Developer Name: (null)
+                     Type: app (0x2)
+              Disposition: [enabled, allowed, visible, notified] (0xb)
+               Identifier: 2.com.fiplab.clipboard
+                      URL: file:///Applications/CopyClip.app/
+        Bundle Identifier: com.fiplab.clipboard
+     #2:
+                     Name: Tailscale
+           Developer Name: Tailscale Inc.
+                     Type: app (0x2)
+              Disposition: [disabled, allowed, visible, notified] (0xa)
+               Identifier: 2.io.tailscale.ipn.macsys
+                      URL: file:///Applications/Tailscale.app/
+      Embedded Item Identifiers:
+        #1: 4.io.tailscale.ipn.macsys.login-item-helper
+     #3:
+                     Name: TailscaleLoginItemHelper-macsys
+                     Type: login item (0x4)
+              Disposition: [enabled, allowed, visible, notified] (0xb)
+               Identifier: 4.io.tailscale.ipn.macsys.login-item-helper
+                      URL: Contents/Library/LoginItems/TailscaleLoginItemHelper-macsys.app
+        Bundle Identifier: io.tailscale.ipn.macsys.login-item-helper
+        Parent Identifier: 2.io.tailscale.ipn.macsys
+     #4:
+                     Name: GoogleUpdater
+                     Type: legacy agent (0x10008)
+              Disposition: [enabled, allowed, visible, notified] (0xb)
+               Identifier: 8.com.google.GoogleUpdater.wake
+                      URL: file:///Users/me/Library/LaunchAgents/com.google.GoogleUpdater.wake.plist
+    """
+
+    func testParsesThisUsersLoginItems() {
+        let r = BackgroundItems.parse(dump, uid: 501)
+        XCTAssertEqual(r.map(\.name), ["CopyClip", "Tailscale", "TailscaleLoginItemHelper-macsys", "GoogleUpdater"])
+        XCTAssertEqual(r[0].developer, "")                    // "(null)" means none
+        XCTAssertFalse(r[1].enabled)
+        XCTAssertEqual(r[2].kind, .loginItem)
+        XCTAssertEqual(r[3].kind, .legacy)
+    }
+
+    func testStartupRows() {
+        let rows = BackgroundItems.startupItems(BackgroundItems.parse(dump, uid: 501), runningApps: ["com.fiplab.clipboard": 42])
+        XCTAssertEqual(rows.map(\.scope), [.openAtLogin, .background])   // Tailscale itself isn't set to open; legacy agents come from plists
+        XCTAssertEqual(rows[0].pid, 42)
+        XCTAssertEqual(rows[0].iconPath, "/Applications/CopyClip.app")
+        XCTAssertTrue(rows[1].displayName.hasPrefix("Tailscale ("))
+        XCTAssertEqual(rows[1].iconPath, "/Applications/Tailscale.app")
+        XCTAssertEqual(rows[1].statusText, "Allowed")
+    }
+}

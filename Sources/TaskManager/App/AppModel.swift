@@ -169,6 +169,12 @@ final class AppModel {
         updateRunning()
         updateNeeds()
         updateVisibility()
+        // APEX_OPEN=freememory|storage opens that sheet at launch (screenshots, layout checks).
+        switch ProcessInfo.processInfo.environment["APEX_OPEN"] {
+        case "freememory": showFreeMemory = true
+        case "storage": showCleanup = true
+        default: break
+        }
     }
 
     func stop() { sampler.shutdown(); HistoryStore.shared.save(); DriveHealthStore.shared.save() }

@@ -1,9 +1,13 @@
 import AppKit
 
-/// A LaunchAgent / LaunchDaemon that starts automatically.
+/// Something that starts automatically: a LaunchAgent / LaunchDaemon plist,
+/// an app that opens at login, or a background item an app registered.
 struct StartupItem: Identifiable, Hashable, Sendable {
     var id: String { plistPath }
-    enum Scope: String, Sendable { case user = "Login Agent (you)", allUsers = "Login Agent (all users)", system = "System Daemon" }
+    enum Scope: String, Sendable {
+        case user = "Login Agent (you)", allUsers = "Login Agent (all users)", system = "System Daemon"
+        case openAtLogin = "Opens at Login", background = "Allowed in Background"
+    }
 
     let label: String
     let plistPath: String
@@ -20,7 +24,12 @@ struct StartupItem: Identifiable, Hashable, Sendable {
     var isDaemon: Bool { scope == .system }
     /// Added from Apex Activity Manager's "Add App…" (removable here).
     var addedByTaskManager: Bool { label.hasPrefix(StartupItems.ownPrefix) }
-    var statusText: String { enabled ? "Enabled" : "Disabled" }
+    /// Listed by macOS's Login Items database rather than a plist folder.
+    var fromLoginItems: Bool { scope == .openAtLogin || scope == .background }
+    var statusText: String {
+        if scope == .background { return enabled ? "Allowed" : "Not allowed" }
+        return enabled ? "Enabled" : "Disabled"
+    }
     var enabledSort: Int { enabled ? 1 : 0 }
 }
 
@@ -63,7 +72,7 @@ enum StartupItems {
         return nil
     }
 
-    /// Reads plists directly (no `plutil` spawn per file, unlike the original).
+    /// Reads plists directly (no tool spawned per file).
     static func load() -> [StartupItem] {
         let overrides = Launchd.enabledOverrides()
         let running = Dictionary(Launchd.services().compactMap { s in s.pid.map { (s.label, $0) } }, uniquingKeysWith: { a, _ in a })
