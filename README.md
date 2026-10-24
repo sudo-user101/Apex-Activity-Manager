@@ -6,7 +6,8 @@
 
 **See what your Mac is doing, understand why, and fix it.**
 
-A native macOS activity manager by **CyberNet Labs**: live performance,
+A native macOS activity manager by **CyberNet Labs**, designed and built by
+[**sudo-user**](https://github.com/sudo-user101): live performance,
 diagnostics that explain themselves, drive and storage tools, and battery
 control, in one light app that stops working when you're not looking at it.
 
@@ -35,6 +36,8 @@ control, in one light app that stops working when you're not looking at it.
   working even when Apex is closed.
 - **Light by design.** Native Swift, under 10 MB, no tools spawned every
   second, and sampling pauses completely when the window is hidden.
+- **Fast clean-up.** Storage scans measure folders in parallel across every
+  CPU core, so Clean and Analyze fill in quickly even on large libraries.
 - **Honest numbers.** When macOS doesn't expose something, Apex says so
   instead of guessing.
 
@@ -193,7 +196,7 @@ verification afterwards.
 
 ## Install
 
-1. Download **Apex Activity Manager 1.0.0.dmg** from
+1. Download **Apex Activity Manager 1.1.0.dmg** from
    [Releases](https://github.com/sudo-user101/Apex-Activity-Manager/releases/latest).
 2. Open it and drag **Apex Activity Manager** onto **Applications**.
 3. The first time, macOS may say it can't check the app (it isn't notarized
@@ -260,5 +263,11 @@ Source-available under the [PolyForm Strict License 1.0.0](LICENSE): you may
 read, build and use Apex for personal and other noncommercial purposes, but
 not modify, redistribute or use it commercially. For other uses, contact
 CyberNet Labs through the repository's issues.
+
+## Credits
+
+Apex Activity Manager is a CyberNet Labs product, designed and built by
+[sudo-user](https://github.com/sudo-user101): the idea, the design and the
+direction of every feature.
 
 © 2026 CyberNet Labs.

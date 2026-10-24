@@ -32,3 +32,24 @@ final class StorageHubTests: XCTestCase {
         XCTAssertFalse(OptimizeTask.all.first { $0.id == .quarantine }!.defaultOn)
     }
 }
+
+final class FastSizeTests: XCTestCase {
+    func testParallelSizeMatchesFileByFile() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("apex-fs-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: root) }
+        for d in ["a/b/c", "d", "e/f"] { try fm.createDirectory(at: root.appendingPathComponent(d), withIntermediateDirectories: true) }
+        for (i, f) in ["a/1", "a/b/2", "a/b/c/3", "d/4", "e/f/5", "6"].enumerated() {
+            try Data(repeating: 7, count: 10_000 * (i + 1)).write(to: root.appendingPathComponent(f))
+        }
+        var expected: UInt64 = 0
+        for case let u as URL in fm.enumerator(at: root, includingPropertiesForKeys: [.totalFileAllocatedSizeKey, .isRegularFileKey])! {
+            let v = try u.resourceValues(forKeys: [.totalFileAllocatedSizeKey, .isRegularFileKey])
+            if v.isRegularFile == true { expected += UInt64(v.totalFileAllocatedSize ?? 0) }
+        }
+        let r = FastSize.allocated(root.path)
+        XCTAssertEqual(r.bytes, expected)
+        XCTAssertFalse(r.partial)
+        XCTAssertEqual(FastSize.allocated([root.appendingPathComponent("d").path, "/nonexistent-apex"]).last, 0)
+    }
+}

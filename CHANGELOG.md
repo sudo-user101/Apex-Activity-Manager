@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 1.1.0 (2026-10-24)
+
+- Faster storage scans: Clean, Analyze and drive Storage measure folders in
+  parallel across all CPU cores (about 2× faster on caches in testing).
 
 - Accessories: stop a USB drive and resume it without unplugging it, and
   disconnect / reconnect Bluetooth accessories; Reconnect brings back a drive

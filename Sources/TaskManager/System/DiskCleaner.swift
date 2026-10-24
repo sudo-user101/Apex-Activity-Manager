@@ -216,28 +216,13 @@ enum DiskCleaner {
     // MARK: Helpers
 
     private static func children(of dir: String, detail: String) -> [CleanItem] {
-        ((try? fm.contentsOfDirectory(atPath: dir)) ?? []).filter { $0 != ".DS_Store" }.map { name in
-            let p = dir + "/" + name
-            return CleanItem(path: p, name: name, size: size(of: p), detail: detail)
-        }
+        let names = ((try? fm.contentsOfDirectory(atPath: dir)) ?? []).filter { $0 != ".DS_Store" }
+        let paths = names.map { dir + "/" + $0 }
+        let sizes = FastSize.allocated(paths)        // in parallel
+        return names.indices.map { CleanItem(path: paths[$0], name: names[$0], size: sizes[$0], detail: detail) }
     }
 
-    static func size(of path: String) -> UInt64 {
-        var isDir: ObjCBool = false
-        guard fm.fileExists(atPath: path, isDirectory: &isDir) else { return 0 }
-        if !isDir.boolValue {
-            return UInt64((try? URL(fileURLWithPath: path).resourceValues(forKeys: [.totalFileAllocatedSizeKey]).totalFileAllocatedSize) ?? 0)
-        }
-        guard let e = fm.enumerator(at: URL(fileURLWithPath: path), includingPropertiesForKeys: [.totalFileAllocatedSizeKey, .isRegularFileKey],
-                                    options: [], errorHandler: { _, _ in true }) else { return 0 }
-        var total: UInt64 = 0
-        for case let url as URL in e {
-            if let v = try? url.resourceValues(forKeys: [.totalFileAllocatedSizeKey, .isRegularFileKey]), v.isRegularFile == true {
-                total += UInt64(v.totalFileAllocatedSize ?? 0)
-            }
-        }
-        return total
-    }
+    static func size(of path: String) -> UInt64 { FastSize.allocated(path).bytes }
 
     /// Moves items to the Trash (recoverable). Returns (freed bytes, failures).
     static func trash(_ items: [CleanItem]) -> (UInt64, [String]) {

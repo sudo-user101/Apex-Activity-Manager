@@ -69,26 +69,9 @@ enum DiskAnalyzer {
             for e in oldDownloads() { let (s, p) = measure(e.path, cancelled: cancelled); total += s; partial = partial || p }
             return (total, partial)
         }
-        let url = URL(fileURLWithPath: path)
-        let keys: Set<URLResourceKey> = [.totalFileAllocatedSizeKey, .fileAllocatedSizeKey, .isRegularFileKey]
-        var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir) else { return (0, true) }
-        if !isDir.boolValue {
-            let v = try? url.resourceValues(forKeys: keys)
-            return (UInt64(v?.totalFileAllocatedSize ?? v?.fileAllocatedSize ?? 0), false)
-        }
-        var partial = false
-        guard let e = FileManager.default.enumerator(at: url, includingPropertiesForKeys: Array(keys), options: [],
-                                                     errorHandler: { _, _ in partial = true; return true }) else { return (0, true) }
-        var total: UInt64 = 0
-        var n = 0
-        for case let u as URL in e {
-            n += 1
-            if n % 2000 == 0 && cancelled() { return (total, true) }
-            guard let v = try? u.resourceValues(forKeys: keys), v.isRegularFile == true else { continue }
-            total += UInt64(v.totalFileAllocatedSize ?? v.fileAllocatedSize ?? 0)
-        }
-        return (total, partial)
+        guard FileManager.default.fileExists(atPath: path) else { return (0, true) }
+        let r = withoutActuallyEscaping(cancelled) { c in FastSize.allocated(path, cancelled: c) }
+        return (r.bytes, r.partial)
     }
 }
 
