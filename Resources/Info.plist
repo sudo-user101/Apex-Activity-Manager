@@ -19,6 +19,7 @@
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSSupportsAutomaticTermination</key><false/>
+    <key>NSBluetoothAlwaysUsageDescription</key><string>Apex lists your Bluetooth accessories and can disconnect and reconnect them when you ask.</string>
     <key>NSAppleEventsUsageDescription</key>
     <string>Apex Activity Manager uses the standard administrator prompt to end or reprioritise processes owned by other users.</string>
 </dict>

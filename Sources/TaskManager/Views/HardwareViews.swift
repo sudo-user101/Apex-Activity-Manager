@@ -375,6 +375,8 @@ struct AccessoriesButton: View {
     @State private var show = false
     @State private var expanded = Set<String>()
     @State private var message: String?
+    @State private var bluetooth: [AccessoryControl.BluetoothDevice] = []
+    @State private var working = Set<String>()        // devices being stopped / resumed
 
     var body: some View {
         let all = usb.flatMap(\.flattened)
@@ -413,15 +415,29 @@ struct AccessoriesButton: View {
                 else if usb.isEmpty { Text("Nothing plugged in.").foregroundStyle(.secondary) }
                 ForEach(usb) { usbRow($0, depth: 0) }
             }
-            if !store.bluetooth.isEmpty {
+            if !bluetooth.isEmpty {
                 section("Bluetooth") {
-                    ForEach(store.bluetooth) { d in
-                        row("wave.3.right", d.name, detail: "Runs on its own battery", value: "\(d.percent)% charged")
+                    ForEach(bluetooth) { d in
+                        let battery = store.bluetooth.first { $0.name == d.name }.map { "\($0.percent)% charged" } ?? ""
+                        HStack(spacing: 10) {
+                            Image(systemName: d.connected ? "wave.3.right" : "wave.3.right.circle").frame(width: 18)
+                                .foregroundStyle(d.connected ? Color.blue : .secondary)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(d.name)
+                                Text([d.kind, d.connected ? "Connected" : "Not connected", battery].filter { !$0.isEmpty }.joined(separator: " · "))
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            if working.contains(d.id) { ProgressView().controlSize(.small) }
+                            else {
+                                Button(d.connected ? "Disconnect" : "Connect") { setBluetooth(d, !d.connected) }.controlSize(.small)
+                            }
+                        }
                     }
                 }
             }
             if let message { Text(message).font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true) }
-            Text("macOS doesn’t measure each accessory’s real power use: USB figures are the most each device asked for and was allowed (current × 5 V). Apps can’t switch a USB port’s power off on a Mac; to stop a device drawing power, eject it (drives) and unplug it, or switch it off with its own button.")
+            Text("macOS doesn’t measure each accessory’s real power use: USB figures are the most each device asked for and was allowed (current × 5 V). Stop pauses a drive without unplugging it, and Bluetooth devices can be disconnected and reconnected here. Other USB devices can’t be paused by apps, and no Mac lets apps switch a USB port’s power off.")
                 .font(.caption).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -443,8 +459,13 @@ struct AccessoriesButton: View {
                 .monospacedDigit().foregroundStyle(.secondary)
                 .help("\(d.milliamps) mA allocated of \(d.availableMilliamps) mA the port offers")
             if let drive {
-                Button("Eject") { message = DeviceActions.eject(drive) ?? "“\(drive.name)” ejected. It no longer reads or writes; unplug it to stop it drawing power." }
-                    .controlSize(.small)
+                let stopped = drive.volumes.isEmpty
+                if working.contains(drive.id) { ProgressView().controlSize(.small) }
+                else {
+                    Button(stopped ? "Resume" : "Stop") { setDrive(drive, stop: !stopped) }
+                        .controlSize(.small)
+                        .help(stopped ? "Mount it again; it's still connected" : "Unmount it: it stays connected but stops reading and writing until you resume it")
+                }
             }
         }
         if d.isHub && !d.children.isEmpty {
@@ -460,7 +481,7 @@ struct AccessoriesButton: View {
     /// The plugged-in drive behind a USB device (same serial number), if any.
     private func storage(for d: USBAccessory) -> StorageDevice? {
         guard !d.serial.isEmpty else { return nil }
-        return model.snapshot.system.storageDevices.first { $0.serial == d.serial && !$0.volumes.isEmpty }
+        return model.snapshot.system.storageDevices.first { $0.serial == d.serial }
     }
 
     private func section<C: View>(_ title: String, @ViewBuilder _ content: () -> C) -> some View {
@@ -482,9 +503,34 @@ struct AccessoriesButton: View {
         }
     }
 
+    private func setDrive(_ d: StorageDevice, stop: Bool) {
+        working.insert(d.id); message = nil
+        let disk = d.id, name = d.name
+        Task {
+            let err = await Task.detached { stop ? AccessoryControl.stopDrive(disk) : AccessoryControl.resumeDrive(disk) }.value
+            DeviceWatcher.shared.bump()
+            try? await Task.sleep(for: .seconds(1.5))     // let the next sample show the new state
+            message = err ?? (stop ? "“\(name)” stopped. It's still connected; Resume brings it back." : "“\(name)” resumed.")
+            working.remove(disk)
+        }
+    }
+
+    private func setBluetooth(_ d: AccessoryControl.BluetoothDevice, _ on: Bool) {
+        working.insert(d.id); message = nil
+        let address = d.address
+        Task {
+            let err = await Task.detached { AccessoryControl.setBluetooth(on, address: address) }.value
+            bluetooth = await Task.detached { AccessoryControl.bluetoothDevices() }.value
+            if let err { message = err }
+            working.remove(address)
+        }
+    }
+
     private func load() async {
         let list = await Task.detached(priority: .utility) { Accessories.usb() }.value
         if list != usb { usb = list }
+        let bt = await Task.detached(priority: .utility) { AccessoryControl.bluetoothDevices() }.value
+        if bt != bluetooth { bluetooth = bt }
         loaded = true
     }
 }

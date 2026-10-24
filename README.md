@@ -153,8 +153,9 @@ verification afterwards.
   and **night charging**: hold a lower charge overnight and be full by
   morning, even with the lid closed.
 - **Accessories:** every connected USB device (opening hubs and docks into
-  what's plugged into them) with the power it's allowed, plus Bluetooth
-  battery levels.
+  what's plugged into them) with the power it's allowed; **stop** a USB drive
+  and **resume** it without unplugging, and disconnect or reconnect
+  Bluetooth accessories.
 
 <p align="center">
   <img src="docs/images/energy.png" alt="Energy: power draw, battery history, charge limit and battery health" />

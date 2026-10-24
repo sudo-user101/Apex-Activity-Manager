@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Accessories: stop a USB drive and resume it without unplugging it, and
+  disconnect / reconnect Bluetooth accessories.
 - Startup lists everything macOS starts automatically: apps that open at
   login and background items apps registered, next to launch agents and daemons.
 
