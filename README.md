@@ -4,94 +4,212 @@
 
 # Apex Activity Manager
 
-**A native activity manager for macOS, by CyberNet Labs.**
+**See what your Mac is doing, understand why, and fix it.**
 
-See what your Mac is doing, understand why, and fix it, in a light app that
-feels at home on macOS and borrows the conveniences power users expect.
+A native macOS activity manager by **CyberNet Labs**: live performance,
+diagnostics that explain themselves, drive and storage tools, and battery
+control, in one light app that stops working when you're not looking at it.
 
 ![Platform](https://img.shields.io/badge/platform-macOS%2014%2B-000000?logo=apple&logoColor=white)
-![Swift](https://img.shields.io/badge/Swift-5.10-F05138?logo=swift&logoColor=white)
-![Apple silicon + Intel](https://img.shields.io/badge/arch-Apple%20silicon%20%2B%20Intel-555)
+![Swift](https://img.shields.io/badge/Swift-SwiftUI%20%2B%20AppKit-F05138?logo=swift&logoColor=white)
+![Apple silicon + Intel](https://img.shields.io/badge/universal-Apple%20silicon%20%2B%20Intel-555)
 ![License](https://img.shields.io/badge/license-PolyForm%20Strict-blue)
+
+[**Download for macOS**](https://github.com/sudo-user101/Apex-Activity-Manager/releases/latest) · [Features](#features) · [Install](#install) · [FAQ](#faq)
 
 </div>
 
 <p align="center">
-  <img src="docs/images/drive.png" width="860" alt="A plugged-in drive's page: live read/write graph, connection, health and storage tools" />
+  <img src="docs/images/memory.png" alt="Apex Performance page showing Memory: RAM used and memory pressure over time, the full memory breakdown, swap and the processes using the most memory" />
 </p>
 
-## Why Apex
+## Highlights
 
-- **Native and light.** SwiftUI + AppKit, under 10 MB. System numbers come
-  straight from the kernel and IOKit; no tools are spawned every tick, and
-  sampling stops completely when the window is hidden.
-- **Explains, not just measures.** Diagnostics come with the evidence, what it
-  means, and steps to fix it, and never claim something is fixed unless Apex
-  can check it.
-- **Honest numbers.** When macOS doesn't expose something (per-accessory power,
-  GPU power without admin rights), Apex says so instead of guessing.
+- **Everything in one window.** Processes, CPU, memory, disks, network, GPU,
+  energy, sensors, startup items, users and services, one click apart.
+- **Explains, then helps.** Alerts and diagnostics say what happened, why it
+  matters and what to do, with the evidence behind them.
+- **Drive toolkit.** Drive Doctor, storage clean-up for every drive, live
+  file-transfer control and a guided bootable USB creator.
+- **Battery care.** Charge limit, scheduled and overnight charging that keep
+  working even when Apex is closed.
+- **Light by design.** Native Swift, under 10 MB, no tools spawned every
+  second, and sampling pauses completely when the window is hidden.
+- **Honest numbers.** When macOS doesn't expose something, Apex says so
+  instead of guessing.
 
 ## Features
 
-**Processes**
-- Apps with their helper processes grouped, background and system processes,
-  filter and search, an inspector with security details (signature,
-  notarization) and the command line.
-- End, End Tree, Pause / Resume, priority, and **Optimize**: keep an app
-  running at background priority on efficiency cores, hidden, until restored.
+### Performance at a glance
 
-**Performance**
-- CPU (per core, P/E cores), Memory (pressure, breakdown, swap), Disk,
-  Network, GPU, Energy and Sensors, each with a 1–10 minute graph and an
-  advanced graph with exact values on hover.
-- **Memory:** Free Up Memory with Optimize, Quit (and **Reopen** later, with
-  each app's windows), or clear the file cache.
-- **Network:** local IP per interface (private vs public), router and host
-  names, per-app traffic and connections, listening ports.
+Live graphs for every part of the Mac, 1 to 10 minutes of history, and an
+advanced graph with exact values on hover.
+
+- **CPU:** total, user and system time, every core (efficiency and
+  performance cores labelled); click the graph to see which processes use it.
+- **Memory:** pressure (Normal / Elevated / Critical), apps, OS memory,
+  compressed, cache, free, swap and how fast it's moving, RAM type and speed.
 - **GPU:** utilisation, rendering and geometry load, memory, temperature,
-  top GPU processes, and the share used by local AI runtimes.
-- **Energy:** per-app power, battery health and history, connected
-  accessories (USB devices behind hubs, Bluetooth batteries).
-
-**Drives**
-- A page for every plugged-in drive, added and removed live, with the USB
-  standard it's running at.
-- **Drive Doctor:** findings with evidence, severity and confidence, steps in
-  order, read-only First Aid, and a remaining-life estimate only when the
-  drive's own wear data supports one.
-- **Storage:** Optimize, Analyze (folder by folder) and Clean for the startup
-  drive; Analyze, drive Trash and hidden helper files for external drives.
-  Everything is reviewed before anything is removed.
-- **Transfers:** a live icon while files copy onto a drive, with progress,
-  Cancel, and Move / Trash for a copy that went to the wrong place.
-- **Bootable Media Creator:** a guided Image → Drive → Customise → Review →
-  Create flow for Windows, Linux and macOS installers. For Windows 11 it can
-  add an answer file: skip the TPM / Secure Boot / RAM checks, set up offline
-  with a local account, use your region, and install apps at first sign-in.
-
-**Battery** (MacBooks)
-- Charge limit (50–100 %), Charge to 100% Now, weekly schedules, and night
-  charging (hold lower overnight, full by morning). Enforced by a small
-  privileged helper, so it keeps working with Apex closed.
-
-**Also**
-- History (30-day app usage, alert events with the reason each fired),
-  notifications for sustained CPU, memory, swap, heat and disk problems,
-  Startup items, Users, Services, Local AI runtimes, and a menu bar monitor.
+  GPU restarts and the processes using the GPU, including local AI models.
 
 <p align="center">
-  <img src="docs/images/energy.png" width="860" alt="Energy: whole-Mac power draw, battery history, charge limit and battery health" />
+  <img src="docs/images/cpu.png" width="49%" alt="CPU page with per-core graphs" />
+  <img src="docs/images/gpu.png" width="49%" alt="GPU page with utilisation, memory, temperature and top GPU processes" />
 </p>
+
+### Processes, grouped the way you think
+
+- Apps with their helper processes folded underneath, then background and
+  system processes; filter, search and sort by CPU, memory, disk, network,
+  GPU or energy.
+- An inspector for any process: what it is, where it lives, its signature
+  and notarization, how long it has run, and its command line.
+- End, End Tree, Pause / Resume, change priority, or **Optimize**: keep an app
+  running at background priority on efficiency cores, hidden, until you
+  restore it.
+
+<p align="center">
+  <img src="docs/images/processes.png" alt="Processes: apps grouped with their helpers, background processes, CPU, memory, disk, network and GPU per process" />
+</p>
+
+### Free Up Memory, and put it all back
+
+- See which apps hold the most memory, then **Optimize** them (they keep
+  running but give way to everything else), **Quit** them, or clear the
+  file cache.
+- **Restore** brings optimized apps back on screen; **Reopen** relaunches the
+  apps you quit, hidden ones hidden and the front one in front, with their
+  windows where the app supports macOS window restoration.
+
+<p align="center">
+  <img src="docs/images/free-up-memory.png" alt="Free Up Memory sheet with per-app memory, Optimize, Quit and Clear cache" />
+</p>
+
+### Network
+
+- Received and sent over time, your **local IP** per interface (Wi-Fi,
+  Ethernet, VPN) marked private or public, router name and model, DNS.
+- Per-app traffic and every connection with its remote host, plus listening
+  ports with one click to free a port.
+
+<p align="center">
+  <img src="docs/images/network.png" alt="Network page with traffic graph, local IP, connection details and per-app traffic" />
+</p>
+
+### Drives, diagnosed
+
+- A page for every drive as soon as it's plugged in: live reads and writes,
+  the USB standard it's actually running at (and a warning if a fast drive is
+  stuck on a slow port), capacity and volumes, and a one-click eject.
+- **Drive Doctor** turns health data into findings: what was detected, why it
+  matters, the evidence (from the drive itself, measured by Apex, or reported
+  by macOS), severity and confidence, steps in order, and when to get help.
+  It estimates remaining life only when the drive's own wear data supports it.
+- Read-only **Check for Errors** with macOS First Aid; health changes go into
+  History and notify you when a drive becomes at risk.
+- **Transfers:** while files copy onto a drive its icon turns blue; see each
+  file's progress and destination, cancel it, or move a finished copy that
+  went to the wrong place.
+
+<p align="center">
+  <img src="docs/images/drive.png" width="49%" alt="A plugged-in USB drive's page with read and write graph, connection and drive health" />
+  <img src="docs/images/drive-doctor.png" width="49%" alt="Drive Doctor for the startup SSD with status, remaining rated life and findings" />
+</p>
+
+### Storage, for every drive
+
+- **Optimize** maintenance tasks, **Analyze** what takes the space folder by
+  folder, and **Clean** caches, logs, leftovers of deleted apps, old
+  installers, build folders and the Trash.
+- On external drives: analyze the drive, empty its own Trash, and remove the
+  hidden helper files macOS leaves on Windows-formatted drives.
+- Everything is listed for review first; nothing is deleted without your say.
+
+<p align="center">
+  <img src="docs/images/storage.png" alt="Storage: Optimize, Analyze and Clean" />
+</p>
+
+### Bootable Media Creator
+
+A guided **Image → Drive → Customise → Review → Create** flow for Windows,
+Linux and macOS installers, with checks before anything is erased and
+verification afterwards.
+
+- Reads a Windows image's editions, build and architecture straight from it.
+- Windows 11 setup options, written as an answer file on the USB drive: skip
+  the TPM / Secure Boot / RAM checks for older PCs, set up offline with a
+  local account, use your region, fewer privacy prompts, and install apps
+  such as Chrome, Firefox, VLC or VS Code at first sign-in.
+
+<p align="center">
+  <img src="docs/images/bootable-media-creator.png" alt="Bootable Media Creator, step 1: choose an image" />
+</p>
+
+### Battery and energy
+
+- Per-app power use, whole-Mac power draw, battery health, cycles and a
+  12-hour charge history.
+- **Charge limit** (50–100 %), **Charge to 100% Now**, weekly **schedules**,
+  and **night charging**: hold a lower charge overnight and be full by
+  morning, even with the lid closed.
+- **Accessories:** every connected USB device (opening hubs and docks into
+  what's plugged into them) with the power it's allowed, plus Bluetooth
+  battery levels.
+
+<p align="center">
+  <img src="docs/images/energy.png" alt="Energy: power draw, battery history, charge limit and battery health" />
+</p>
+
+### Alerts and history
+
+- Notifications for things that matter: an app stuck on high CPU, memory
+  pressure, swap growing, an app's memory climbing for half an hour, heat,
+  low disk space, a disk filling fast, a drive's health getting worse.
+- Short spikes are recorded but never notified; every event explains why it
+  fired. Plus 30 days of per-app usage.
+
+<p align="center">
+  <img src="docs/images/history.png" alt="History: events such as CPU spikes, swap growth and drive health, each with an explanation" />
+</p>
+
+### And more
+
+- **Startup:** launch agents and login items with readable names, on/off,
+  and Add App to open any app at login.
+- **Users** and **Services** (start, stop, restart), **Local AI** runtimes
+  (Ollama, LM Studio, llama.cpp and more) with their models and memory, and
+  a **menu bar** monitor.
 
 ## Install
 
 1. Download **Apex Activity Manager 1.0.0.dmg** from
-   [Releases](https://github.com/sudo-user101/Apex-Activity-Manager/releases).
+   [Releases](https://github.com/sudo-user101/Apex-Activity-Manager/releases/latest).
 2. Open it and drag **Apex Activity Manager** onto **Applications**.
 3. The first time, macOS may say it can't check the app (it isn't notarized
    yet): open **System Settings › Privacy & Security** and click **Open Anyway**.
 
-Requires macOS 14 Sonoma or later, on Apple silicon or Intel.
+**Requirements:** macOS 14 Sonoma or later, Apple silicon or Intel.
+
+## FAQ
+
+**Does Apex need administrator rights?**
+No, not to monitor. You're asked for your password only for actions that
+need it: charge limit and fan control (a small helper is installed once),
+ending other users' processes, clearing the file cache, raw image writes.
+
+**Will it slow my Mac down?**
+It's built not to: about 6 % of one core while you watch the Processes view,
+next to nothing when hidden, and it hands memory back to macOS when idle.
+
+**Is anything sent over the internet?**
+No. Apex has no analytics and no account. It only looks up what you see on
+screen (your router's name, host names of connections) and talks to local AI
+runtimes on your own Mac. "Check on VirusTotal" opens your browser with the
+file's fingerprint, only when you click it.
+
+**Why can't Apex switch off an accessory's power or show GPU watts?**
+macOS doesn't let apps do the first, and only reports the second to
+administrator tools. Apex tells you rather than showing made-up numbers.
 
 ## Build from source
 
@@ -101,10 +219,7 @@ Requires macOS 14 Sonoma or later, on Apple silicon or Intel.
 swift test                       # unit tests
 ```
 
-Needs Xcode or the Command Line Tools (Swift 5.10+). Building into a
-temporary folder keeps the source tree clean (`BUILD_DIR=/path ./build.sh`).
-
-## Project structure
+Needs Xcode or the Command Line Tools (Swift 5.10+).
 
 | Path | What's there |
 |---|---|
@@ -121,22 +236,18 @@ temporary folder keeps the source tree clean (`BUILD_DIR=/path ./build.sh`).
 
 More: [Architecture](docs/ARCHITECTURE.md) · [Where every number comes from](docs/DATA-SOURCES.md) · [AI diagnostics design](docs/AI-DIAGNOSTICS.md) · [Changelog](CHANGELOG.md)
 
-## Status and roadmap
+## Roadmap
 
-Verified on an Apple silicon MacBook running macOS 15. Fan control is built
-and unit-tested but not yet tested on a Mac with fans; the Bootable Media
-Creator has been tested on disk images.
-
-Next: a native Windows edition, AI-assisted explanations (your own key, a
-local model, or an Apex subscription; see the design doc), and a Developer
-ID-signed, notarized release.
+- A native **Windows** edition.
+- AI-assisted explanations: your own API key, a local model, or an Apex
+  subscription ([design](docs/AI-DIAGNOSTICS.md)).
+- A Developer ID-signed, notarized release.
 
 ## License
 
-Source-available under the [PolyForm Strict License 1.0.0](LICENSE):
-you may read, build and use Apex for personal and other noncommercial
-purposes, but not modify, redistribute or use it commercially.
-For other uses, contact CyberNet Labs through the repository's issues.
+Source-available under the [PolyForm Strict License 1.0.0](LICENSE): you may
+read, build and use Apex for personal and other noncommercial purposes, but
+not modify, redistribute or use it commercially. For other uses, contact
+CyberNet Labs through the repository's issues.
 
-© 2026 CyberNet Labs. "Apex Activity Manager" and "CyberNet Labs" are names
-of CyberNet Labs.
+© 2026 CyberNet Labs.
