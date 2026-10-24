@@ -87,6 +87,10 @@ final class ParserTests: XCTestCase {
         XCTAssertEqual(LabelDecoder.decode("com.example.MyCoolHelper").displayName, "Example My Cool Helper")
         XCTAssertEqual(LabelDecoder.decode("com.example.MyCoolHelper").vendorKey, "example")
         XCTAssertEqual(LabelDecoder.decode("org.acme.sync-agent.v2").displayName, "Acme Sync Agent")
+        XCTAssertEqual(LabelDecoder.decode("com.apex.fanhelper").vendor, "CyberNet Labs")
+        XCTAssertEqual(LabelDecoder.decode("com.apex.fanhelper").displayName, "Apex Fanhelper")
+        XCTAssertEqual(LabelDecoder.decode("com.cybernetlabs.nucleussync").vendor, "CyberNet Labs")
+        XCTAssertEqual(LabelDecoder.decode("com.cybernetlabs.nucleussync").displayName, "Nucleussync")
     }
 }
 

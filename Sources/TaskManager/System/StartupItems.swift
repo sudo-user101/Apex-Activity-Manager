@@ -102,9 +102,12 @@ enum StartupItems {
                    let bundleName = bundleName(icon) {
                     name = bundleName
                 }
+                var vendor = decoded.vendor
                 if label.hasPrefix(ownPrefix), let app = candidates.last(where: { $0.hasSuffix(".app") }) {
+                    // "Add App…" items open someone else's app: name and vendor are that app's.
                     icon = app
                     name = bundleName(app) ?? (app as NSString).lastPathComponent.replacingOccurrences(of: ".app", with: "")
+                    vendor = ""
                 }
                 if icon.isEmpty { icon = LabelDecoder.hintedApp(vendorKey: decoded.vendorKey, text: label) }
                 items.append(StartupItem(
@@ -112,7 +115,7 @@ enum StartupItems {
                     // launchd's override database wins; otherwise the plist's own Disabled key.
                     enabled: overrides[label] ?? overrides[fileLabel] ?? !((plist["Disabled"] as? Bool) ?? false),
                     running: running[label] != nil, pid: running[label],
-                    displayName: name, vendor: decoded.vendor, program: program, iconPath: icon))
+                    displayName: name, vendor: vendor, program: program, iconPath: icon))
             }
         }
         return items.sorted { $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending }
@@ -152,10 +155,19 @@ enum LabelDecoder {
     /// Top-level reverse-DNS parts that never name a maker.
     static let topLevel: Set<String> = ["com", "org", "net", "io", "co", "dev", "app", "me", "us", "uk", "de", "eu", "tv", "info"]
 
+    /// CyberNet Labs' own label prefixes → the product name shown before the rest.
+    static let ownMakers: [String: String] = ["apex": "Apex", "cybernetlabs": "", "taskmanager": "Apex"]
+    static let ownVendor = "CyberNet Labs"
+
     static func decode(_ label: String) -> Decoded {
         var parts = label.split(separator: ".").map(String.init)
         if parts.count >= 2, topLevel.contains(parts[0].lowercased()) { parts.removeFirst() }
         guard let makerRaw = parts.first else { return Decoded(vendorKey: "", vendor: "", displayName: label) }
+        if let product = ownMakers[makerRaw.lowercased()] {
+            let rest = parts.dropFirst().map(words).filter { !$0.isEmpty }.joined(separator: " ")
+            let name = collapseRepeats([product, rest].filter { !$0.isEmpty }.joined(separator: " "))
+            return Decoded(vendorKey: makerRaw.lowercased(), vendor: ownVendor, displayName: name.isEmpty ? label : name)
+        }
         let maker = installedName(forPrefixOf: label).map { firstWord($0) } ?? words(makerRaw)
         var product = parts.dropFirst().map(words).filter { !$0.isEmpty }.joined(separator: " ")
         if product.lowercased().hasPrefix(maker.lowercased()) {
