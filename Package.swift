@@ -25,6 +25,7 @@ let package = Package(
                 .linkedFramework("SystemConfiguration"),
                 .linkedFramework("DiskArbitration"),
                 .linkedFramework("IOBluetooth"),
+                .linkedFramework("IOUSBHost"),
             ]
         ),
         .testTarget(

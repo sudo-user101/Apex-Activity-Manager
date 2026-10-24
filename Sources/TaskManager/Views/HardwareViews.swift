@@ -377,6 +377,7 @@ struct AccessoriesButton: View {
     @State private var message: String?
     @State private var bluetooth: [AccessoryControl.BluetoothDevice] = []
     @State private var working = Set<String>()        // devices being stopped / resumed
+    @State private var drives = Set<String>()          // USB serials of drives (mass storage)
 
     var body: some View {
         let all = usb.flatMap(\.flattened)
@@ -437,7 +438,7 @@ struct AccessoriesButton: View {
                 }
             }
             if let message { Text(message).font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true) }
-            Text("macOS doesn’t measure each accessory’s real power use: USB figures are the most each device asked for and was allowed (current × 5 V). Stop pauses a drive without unplugging it, and Bluetooth devices can be disconnected and reconnected here. Other USB devices can’t be paused by apps, and no Mac lets apps switch a USB port’s power off.")
+            Text("macOS doesn’t measure each accessory’s real power use: USB figures are the most each device asked for and was allowed (current × 5 V). Stop pauses a drive without unplugging it (Reconnect also brings back a drive that was ejected), and Bluetooth devices can be disconnected and reconnected here. Other USB devices can’t be paused by apps, and no Mac lets apps switch a USB port’s power off.")
                 .font(.caption).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -458,6 +459,14 @@ struct AccessoriesButton: View {
             Text(d.isHub ? String(format: "up to %.1f W in all", d.totalWatts) : (d.milliamps > 0 ? String(format: "up to %.1f W", d.maxWatts) : "Own power"))
                 .monospacedDigit().foregroundStyle(.secondary)
                 .help("\(d.milliamps) mA allocated of \(d.availableMilliamps) mA the port offers")
+            if drive == nil, drives.contains(d.serial) {
+                // A drive that's plugged in but ejected: re-detect it to bring it back.
+                if working.contains(d.serial) { ProgressView().controlSize(.small) }
+                else {
+                    Button("Reconnect") { reconnect(d) }.controlSize(.small)
+                        .help("It was ejected but is still plugged in. Reconnect brings it back without unplugging it.")
+                }
+            }
             if let drive {
                 let stopped = drive.volumes.isEmpty
                 if working.contains(drive.id) { ProgressView().controlSize(.small) }
@@ -515,6 +524,19 @@ struct AccessoriesButton: View {
         }
     }
 
+    private func reconnect(_ d: USBAccessory) {
+        working.insert(d.serial); message = nil
+        let serial = d.serial, name = d.name
+        Task {
+            let err = await Task.detached { AccessoryControl.reconnect(serial: serial) }.value
+            DeviceWatcher.shared.bump()
+            try? await Task.sleep(for: .seconds(4))       // macOS re-detects and mounts it
+            message = err ?? "“\(name)” reconnected."
+            working.remove(serial)
+            await load()
+        }
+    }
+
     private func setBluetooth(_ d: AccessoryControl.BluetoothDevice, _ on: Bool) {
         working.insert(d.id); message = nil
         let address = d.address
@@ -529,6 +551,8 @@ struct AccessoriesButton: View {
     private func load() async {
         let list = await Task.detached(priority: .utility) { Accessories.usb() }.value
         if list != usb { usb = list }
+        let ms = await Task.detached(priority: .utility) { AccessoryControl.massStorageSerials() }.value
+        if ms != drives { drives = ms }
         let bt = await Task.detached(priority: .utility) { AccessoryControl.bluetoothDevices() }.value
         if bt != bluetooth { bluetooth = bt }
         loaded = true
