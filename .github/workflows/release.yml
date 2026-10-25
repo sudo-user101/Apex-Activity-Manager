@@ -1,0 +1,111 @@
+# Builds, signs, notarizes and publishes Apex when a version tag is pushed:
+#   git tag v1.3.0 && git push origin v1.3.0
+# The tag must match CFBundleShortVersionString in Resources/Info.plist.
+# Secrets it needs are described in docs/RELEASING.md.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tag matches the app version
+        run: |
+          VERSION="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' Resources/Info.plist)"
+          if [ "${GITHUB_REF_NAME#v}" != "$VERSION" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME doesn't match the app version $VERSION in Resources/Info.plist"
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Check the secrets are set
+        env:
+          CERT: ${{ secrets.DEVELOPER_ID_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.DEVELOPER_ID_CERT_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          missing=""
+          for name in CERT CERT_PASSWORD APPLE_ID TEAM_ID APP_PASSWORD; do
+            [ -n "${!name}" ] || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Missing repository secrets:$missing (see docs/RELEASING.md)"
+            exit 1
+          fi
+
+      - name: Import the Developer ID certificate into a temporary keychain
+        env:
+          CERT: ${{ secrets.DEVELOPER_ID_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.DEVELOPER_ID_CERT_PASSWORD }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/apex-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          echo "$CERT" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          rm -f "$RUNNER_TEMP/cert.p12"
+          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" | grep -m1 'Developer ID Application' | sed -E 's/.*"(.*)".*/\1/')"
+          if [ -z "$IDENTITY" ]; then
+            echo "::error::The certificate has no 'Developer ID Application' identity (see docs/RELEASING.md)"
+            exit 1
+          fi
+          echo "APEX_SIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+          echo "APEX_KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
+
+      - name: Build, sign, notarize and staple
+        env:
+          APEX_APPLE_ID: ${{ secrets.APPLE_ID }}
+          APEX_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APEX_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: ./build.sh --universal --dmg --notarize
+
+      - name: Checksum and release notes
+        run: |
+          DMG="dist/Apex Activity Manager $VERSION.dmg"
+          (cd dist && shasum -a 256 "Apex Activity Manager $VERSION.dmg" > "Apex Activity Manager $VERSION.dmg.sha256")
+          # This version's section of CHANGELOG.md ("## 1.3.0 (date)" up to the next "## ").
+          awk -v v="$VERSION" '
+            $0 ~ "^## " v "([ (]|$)" { on = 1; next }
+            on && /^## / { exit }
+            on { print }
+          ' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+          {
+            echo
+            echo "**Install:** open the .dmg and drag Apex Activity Manager onto Applications. Signed with Developer ID and notarized by Apple."
+            echo
+            echo "SHA-256: \`$(cut -d' ' -f1 "dist/Apex Activity Manager $VERSION.dmg.sha256")\`"
+          } >> "$RUNNER_TEMP/notes.md"
+          echo "DMG=$DMG" >> "$GITHUB_ENV"
+
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" "$DMG" "$DMG.sha256" \
+            --title "Apex Activity Manager $VERSION" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            --verify-tag
+
+      - name: Remove the temporary keychain
+        if: always()
+        run: |
+          [ -n "${APEX_KEYCHAIN:-}" ] && security delete-keychain "$APEX_KEYCHAIN" || true

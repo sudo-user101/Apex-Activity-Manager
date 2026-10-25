@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- **Signed and notarized releases:** `build.sh --notarize` signs the app and
+  its helper with a Developer ID (hardened runtime, secure timestamp),
+  notarizes and staples the app and the .dmg; credentials come only from
+  environment variables. A release workflow does it all when a version tag
+  is pushed and publishes the .dmg with its SHA-256
+  ([Releasing](docs/RELEASING.md)).
+- New README, a website (`site/`, published with GitHub Pages), a security
+  policy explaining the helper and every password prompt, contribution
+  guidelines, and bug report and feature request forms.
+
 ## 1.2.0 (2026-10-25)
 
 - **Cloud Disks** (Performance): iCloud Drive, OneDrive, Google Drive,
