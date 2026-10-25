@@ -1,15 +1,17 @@
 import SwiftUI
 
 enum Resource: String, CaseIterable, Identifiable {
-    case cpu, memory, disk, network, gpu, battery, sensors
+    case cpu, memory, disk, cloud, network, gpu, display, battery, sensors
     var id: String { rawValue }
     var title: String {
         switch self {
         case .cpu: return "CPU"
         case .memory: return "Memory"
         case .disk: return "Disk"
+        case .cloud: return "Cloud Disks"
         case .network: return "Network"
         case .gpu: return "GPU"
+        case .display: return "Display"
         case .battery: return "Energy"
         case .sensors: return "Sensors"
         }
@@ -19,8 +21,10 @@ enum Resource: String, CaseIterable, Identifiable {
         case .cpu: return .blue
         case .memory: return .messageBlue
         case .disk: return .green
+        case .cloud: return .cyan
         case .network: return .orange
         case .gpu: return .pink
+        case .display: return .teal
         case .battery: return .green
         case .sensors: return .red
         }
@@ -47,22 +51,23 @@ struct PerformanceView: View {
         let s = model.snapshot.system
         let items = PerfItem.all(s)
         let selected = current(items)
+        let rows = Resource.allCases.map { PerfItem.resource($0) }
         HStack(spacing: 0) {
             GeometryReader { geo in
-                // Plugged-in devices add rows, pushing This Mac down; if there are
-                // many, the list scrolls instead of squeezing This Mac away.
-                let need = CGFloat(items.count) * 62 + 12
+                // One row per resource; plugged-in drives and adapters are tabs
+                // on the Storage and Network pages (DeviceSwitcher).
+                let need = CGFloat(rows.count) * 62 + 12
                 let listHeight = min(need, max(300, geo.size.height - 170))
                 VStack(spacing: 0) {
                     // A plain stack, not a List: a List re-selects rows by position when
                     // devices are plugged in or removed. Here only a click (or ↑/↓) selects.
                     ScrollView {
                         VStack(spacing: 2) {
-                            ForEach(items, id: \.self) { item in
-                                SidebarRow(selected: item == selected) {
-                                    if case .resource(let r) = item { ResourceCard(resource: r) } else { DeviceCard(item: item) }
+                            ForEach(rows, id: \.self) { item in
+                                SidebarRow(selected: item.resource == selected.resource) {
+                                    ResourceCard(resource: item.resource)
                                 }
-                                .onTapGesture { itemKey = item.key }
+                                .onTapGesture { if item.resource != selected.resource { itemKey = item.key } }
                             }
                         }
                         .padding(.horizontal, 10).padding(.vertical, 6)
@@ -72,9 +77,9 @@ struct PerformanceView: View {
                     .focusable()
                     .focusEffectDisabled()
                     .onMoveCommand { dir in
-                        guard let i = items.firstIndex(of: selected) else { return }
+                        guard let i = rows.firstIndex(of: .resource(selected.resource)) else { return }
                         let n = dir == .up ? i - 1 : dir == .down ? i + 1 : i
-                        if items.indices.contains(n) { itemKey = items[n].key }
+                        if rows.indices.contains(n) { itemKey = rows[n].key }
                     }
                     // An unplugged drive's page shows Disk / Network until it's back
                     // (current(_:)); the saved choice only changes when you pick a row.
@@ -91,16 +96,31 @@ struct PerformanceView: View {
                     switch selected {
                     case .resource(.battery): EnergyDetail(store: hardware)
                     case .resource(.sensors): SensorsDetail(store: hardware)
-                    case .resource(let r): ResourceDetail(resource: r)
+                    case .resource(.display): DisplayDetail()
+                    case .resource(.cloud): CloudDetail()
+                    case .resource(.network), .net:
+                        // One page per connection (Wi-Fi, Ethernet, VPN); the Network row
+                        // opens the one in use.
+                        if let d = NetworkPage.device(for: selected, in: s) {
+                            DeviceSwitcher(selected: .net(d.id), itemKey: $itemKey)
+                            NetworkPage(device: d, inUse: d.id == s.network.interface)
+                        } else {
+                            ResourceDetail(resource: .network)
+                        }
+                    case .resource(let r):
+                        DeviceSwitcher(selected: selected, itemKey: $itemKey)
+                        ResourceDetail(resource: r)
                     case .disk(let id):
+                        DeviceSwitcher(selected: selected, itemKey: $itemKey)
                         if let d = s.storageDevices.first(where: { $0.id == id }) { StorageDeviceDetail(device: d) }
-                    case .net(let id):
-                        if let d = s.networkDevices.first(where: { $0.id == id }) { NetworkDeviceDetail(device: d) }
                     }
                 }
                 }
+                .id(selected.key)                                   // a fresh page per selection…
+                .transition(.opacity.combined(with: .offset(y: 6)))  // …that fades in instead of jumping
                 .padding(22)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .animation(.easeOut(duration: 0.2), value: selected.key)
                 .environment(\.graphTimeline, model.graphTimeline)
                 .environment(\.advancedGraph, model.advancedGraph)
             }
@@ -128,6 +148,13 @@ private struct ResourceCard: View {
                 case .disk: LineGraph(series: [.init(values: h.diskRead, color: .green), .init(values: h.diskWrite, color: .red, fill: false)], maxValue: nil, gridLines: false, cornerRadius: 4)
                 case .network: LineGraph(series: [.init(values: h.netIn, color: .orange), .init(values: h.netOut, color: .blue, fill: false)], maxValue: nil, gridLines: false, cornerRadius: 4)
                 case .gpu: LineGraph(series: [.init(values: h.gpu, color: resource.color)], gridLines: false, cornerRadius: 4)
+                case .cloud:
+                    RoundedRectangle(cornerRadius: 4).fill(.quaternary.opacity(0.3))
+                        .overlay(Image(systemName: "icloud").font(.title3).foregroundStyle(resource.color))
+                case .display:
+                    // The arrangement, to scale: nothing here changes second to second.
+                    DisplayArrangement(displays: DisplayStore.shared.displays)
+                        .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 4))
                 case .battery: LineGraph(series: [.init(values: h.power, color: .green)],
                                          maxValue: nil, gridLines: false, cornerRadius: 4)
                 case .sensors: LineGraph(series: [.init(values: HardwareStore.shared.cpuTempHistory, color: .red)], gridLines: false, cornerRadius: 4)
@@ -150,6 +177,15 @@ private struct ResourceCard: View {
         case .disk: return "R \(Fmt.rate(s.disk.readPerSec))  W \(Fmt.rate(s.disk.writePerSec))"
         case .network: return "↓ \(Fmt.rate(s.network.inPerSec))  ↑ \(Fmt.rate(s.network.outPerSec))"
         case .gpu: return s.gpu.utilization.map { Fmt.percent($0, decimals: 0) + "%" } ?? "—"
+        case .cloud:
+            let c = CloudStore.shared
+            let on = c.onMacTotal
+            return "\(c.services.count) service\(c.services.count == 1 ? "" : "s")" + (on > 0 ? " · \(Fmt.diskBytes(on)) here" : "")
+        case .display:
+            let n = NSScreen.screens.count
+            guard let m = NSScreen.main else { return "—" }
+            let size = "\(Int(m.frame.width)) × \(Int(m.frame.height))"
+            return n > 1 ? "\(n) displays · \(size)" : size
         case .battery:
             let b = HardwareStore.shared.battery
             if !HardwareStore.shared.hasBattery { return b.systemPower.map { String(format: "%.1f W", $0) } ?? "—" }
@@ -221,7 +257,7 @@ private struct ResourceDetail: View {
     var body: some View {
         let s = model.snapshot.system, h = model.history
         VStack(alignment: .leading, spacing: 16) {
-            PageHeader(title: resource.title, subtitle: subtitle(s), accessory: headerAccessory)
+            PageHeader(title: resource.title, subtitle: subtitle(s), accessory: headerAccessory, record: RecordScope.page(resource))
                 .onAppear {
                     // APEX_OPEN=doctor on the Disk page opens Drive Doctor for the startup drive.
                     if resource == .disk, ProcessInfo.processInfo.environment["APEX_OPEN"] == "doctor" { showDoctor = true }
@@ -345,7 +381,10 @@ private struct ResourceDetail: View {
                     .frame(height: 180)
                 stats([
                     ("Receiving", Fmt.rate(s.network.inPerSec)), ("Sending", Fmt.rate(s.network.outPerSec)),
-                ], extra: AnyView(LocalIPStat(primary: s.network.interface)))
+                ], extra: AnyView(Group {
+                    LocalIPStat(primary: s.network.interface)
+                    PublicIPStat(primary: s.network.interface)
+                }))
                 ConnectionDetails()
                 NetworkTrafficPanel()
                 PortsPanel()
@@ -369,7 +408,7 @@ private struct ResourceDetail: View {
                 if showAI { LocalAIGPUCard(runtimes: ai) }
                 Text("The GPU shares the Mac’s memory with everything else, so “memory” here is system memory the graphics driver uses. Per-app figures are each app’s share of GPU time, from macOS’s GPU accounting. GPU power isn’t shown: macOS only reports it to administrator tools.")
                     .font(.caption).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
-            case .battery, .sensors:
+            case .battery, .sensors, .display, .cloud:
                 EmptyView()
             }
             TopProcesses(resource: resource)
@@ -457,7 +496,7 @@ private struct ResourceDetail: View {
         case .disk: return [s.disk.volumeName, s.disk.fileSystem].filter { !$0.isEmpty }.joined(separator: " · ")
         case .network: return s.network.interface
         case .gpu: return s.gpu.model
-        case .battery, .sensors: return ""
+        case .battery, .sensors, .display, .cloud: return ""
         }
     }
 
@@ -599,7 +638,7 @@ private struct TopProcesses: View {
                 .prefix(6).map { ($0, Fmt.rate($0.diskReadPerSec + $0.diskWritePerSec)) }
         case .gpu:
             return procs.filter { $0.gpu >= 0.1 }.sorted { $0.gpu > $1.gpu }.prefix(6).map { ($0, Fmt.percent($0.gpu, decimals: 1) + "%") }
-        case .network, .battery, .sensors:
+        case .network, .battery, .sensors, .display, .cloud:
             return []   // per-process values are only collected on the Processes view
         }
     }
@@ -950,7 +989,7 @@ private struct LocalIPStat: View {
                         .buttonStyle(.borderless).help("Copy")
                     }
                 }
-                Text("Private addresses only work inside your network. Your public address is assigned by your router’s internet provider; Apex doesn’t contact outside services to look it up.")
+                Text("Private addresses only work inside your network. Your public address (next to this) is the one the internet sees, assigned by your internet provider.")
                     .font(.caption).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
             }
             .padding(14).frame(width: 380)
@@ -962,6 +1001,200 @@ private struct LocalIPStat: View {
                 try? await Task.sleep(for: .seconds(5))
             }
         }
+    }
+}
+
+/// Network › one connection (Wi-Fi, Ethernet, VPN). Every tab is the same
+/// page: graph, speeds, addresses, and the apps using that connection. The
+/// router details and public IP belong to the connection the internet goes
+/// through (`inUse`).
+struct NetworkPage: View {
+    @Environment(AppModel.self) private var model
+    let device: NetworkDevice
+    let inUse: Bool
+    @State private var showDoctor = false
+
+    /// The connection to show: the chosen tab, else the one in use, else the first.
+    static func device(for item: PerfItem, in s: SystemSnapshot) -> NetworkDevice? {
+        if case .net(let id) = item, let d = s.networkDevices.first(where: { $0.id == id }) { return d }
+        return s.networkDevices.first { $0.id == s.network.interface } ?? s.networkDevices.first
+    }
+
+    var body: some View {
+        let d = device
+        let series = model.history.devices["net:" + d.id]
+        VStack(alignment: .leading, spacing: 16) {
+            PageHeader(title: d.name,
+                       subtitle: [d.usb?.short ?? d.connection, d.adapter == d.name ? "" : d.adapter,
+                                  d.isUp ? d.linkText : "not connected", inUse ? "in use for the internet" : ""]
+                        .filter { !$0.isEmpty }.joined(separator: " · "),
+                       subtitleColor: d.isUp ? .secondary : .orange,
+                       accessory: AnyView(
+                           Button { showDoctor = true } label: { Image(systemName: "stethoscope") }
+                               .buttonStyle(.bordered)
+                               .help("Network Doctor: find out why the internet is slow or not working")),
+                       record: .network)
+                .sheet(isPresented: $showDoctor) {
+                    NetworkDoctorView(device: d, primary: model.snapshot.system.network.interface)
+                }
+                .onAppear { if inUse, ProcessInfo.processInfo.environment["APEX_OPEN"] == "netdoctor" { showDoctor = true } }
+            HStack {
+                HStack(spacing: 14) {
+                    ForEach([("Received", Color.orange), ("Sent", Color.blue)], id: \.0) { item in
+                        HStack(spacing: 5) {
+                            RoundedRectangle(cornerRadius: 2).fill(item.1).frame(width: 10, height: 10)
+                            Text(item.0).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                Spacer(); RangeCaption()
+            }
+            LineGraph(series: [.init(values: series?.a ?? [], color: .orange, name: "Received"),
+                               .init(values: series?.b ?? [], color: .blue, fill: false, name: "Sent")], maxValue: nil)
+                .environment(\.graphTimeline, deviceTimeline(series, minutes: model.graphMinutes))
+                .environment(\.graphUnit, .rate)
+                .frame(height: 180)
+            statsGrid(stats(d),
+                      extra: AnyView(Group {
+                          if inUse {
+                              LocalIPStat(primary: d.id)
+                              PublicIPStat(primary: d.id)
+                          }
+                          if d.isUp && d.kind != "VPN" { SpeedStat(interface: d.id) }
+                      }), extraAt: 2)
+            if !d.isUp {
+                Text(d.kind == "Wi-Fi" ? "Wi-Fi is off or not joined to a network."
+                     : d.isPlugIn ? "The adapter is plugged in but has no network link. Check the cable or the other end."
+                     : "No cable is connected to this port.")
+                    .font(.callout).foregroundStyle(.secondary)
+            } else if !inUse {
+                Text("Connected, but internet traffic goes through \(model.snapshot.system.networkDevices.first { $0.id == model.snapshot.system.network.interface }?.name ?? "another connection"). This one is used for its own network only.")
+                    .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            if inUse { ConnectionDetails() }
+            NetworkTrafficPanel(interface: d.id)
+            PortsPanel()
+        }
+    }
+
+    private func stats(_ d: NetworkDevice) -> [(String, String)] {
+        let since = d.isPlugIn ? "since plugged in" : d.kind == "VPN" ? "since connected" : "since startup"
+        var out: [(String, String)] = [("Receiving", Fmt.rate(d.inPerSec)), ("Sending", Fmt.rate(d.outPerSec))]
+        if !inUse { out.append(("Local IP", d.address.isEmpty ? "—" : d.address)) }
+        out += [("Received " + since, Fmt.diskBytes(d.totalIn)), ("Sent " + since, Fmt.diskBytes(d.totalOut)),
+                ("Status", d.isUp ? "Connected" : "Not connected"), ("Link speed", d.linkText.isEmpty ? "—" : d.linkText),
+                ("Interface", d.id), ("Connection", d.usb?.connectedAs ?? d.connection)]
+        if d.kind != "VPN", !d.hardwareAddress.isEmpty { out.append(("Hardware address", d.hardwareAddress)) }
+        if let u = d.usb { out.append(("Supports", u.supports.isEmpty ? "—" : u.supports)) }
+        return out
+    }
+}
+
+/// "Internet connection speed": download / upload through this connection,
+/// measured on request with macOS's network-quality test.
+private struct SpeedStat: View {
+    let interface: String
+    @State private var result: SpeedResult?
+    @State private var testing = false
+    @State private var failed = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 4) {
+                Text("Internet connection speed").font(.caption).foregroundStyle(.secondary)
+                if testing { ProgressView().controlSize(.mini) }
+                else {
+                    Button { test() } label: { Image(systemName: "gauge.with.needle").font(.caption) }
+                        .buttonStyle(.borderless)
+                        .help("Test the speed now (about 15 seconds; downloads and uploads test data)")
+                }
+            }
+            if testing {
+                Text("Testing…").font(.body.weight(.medium)).foregroundStyle(.secondary)
+            } else if let r = result {
+                Text("↓ \(r.downloadText)  ↑ \(r.uploadText)").font(.body.weight(.medium)).monospacedDigit()
+                    .help(r.responsiveness.map { "Responsiveness: \($0) round trips a minute under load. " } ?? ""
+                          + "Measured " + r.date.formatted(date: .abbreviated, time: .shortened))
+                Text(r.date.formatted(.relative(presentation: .named))).font(.caption2).foregroundStyle(.tertiary)
+            } else {
+                Button(failed ? "Couldn’t test · Try again" : "Test speed") { test() }
+                    .buttonStyle(.link).font(.body.weight(.medium))
+            }
+        }
+        .onAppear { result = SpeedTest.saved(interface) }
+        .onChange(of: interface) { result = SpeedTest.saved(interface) }
+    }
+
+    private func test() {
+        testing = true; failed = false
+        let i = interface
+        Task {
+            let r = await Task.detached(priority: .userInitiated) { SpeedTest.run(interface: i) }.value
+            if let r { result = r } else { failed = true }
+            testing = false
+        }
+    }
+}
+
+/// "Public IP": the address the internet sees. Only an outside service can
+/// tell, so Apex asks one (ipify, plain HTTPS, nothing else sent) while the
+/// Network page is open: again when the connection changes, else every
+/// 10 minutes. Blurred by default; the eye button's choice is saved.
+private struct PublicIPStat: View {
+    let primary: String
+    @AppStorage("blurPublicIP") private var blurred = true
+    @State private var address: String?
+    @State private var failed = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 4) {
+                Text("Public IP").font(.caption).foregroundStyle(.secondary)
+                Button { blurred.toggle() } label: {
+                    Image(systemName: blurred ? "eye.slash" : "eye").font(.caption)
+                }
+                .buttonStyle(.borderless)
+                .help(blurred ? "Show the public IP" : "Hide the public IP (kept hidden next time too)")
+            }
+            HStack(spacing: 5) {
+                Text(address ?? (failed ? "Couldn’t check" : "Checking…"))
+                    .font(.body.weight(.medium)).monospacedDigit()
+                    .foregroundStyle(address == nil ? .secondary : .primary)
+                    .blur(radius: blurred && address != nil ? 6 : 0)
+                    .textSelection(.enabled)
+                if let address, !blurred {
+                    Button { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(address, forType: .string) } label: {
+                        Image(systemName: "doc.on.doc").font(.caption)
+                    }
+                    .buttonStyle(.borderless).help("Copy")
+                }
+            }
+        }
+        .help("The address websites see for this Mac, from your internet provider. Looked up with ipify while this page is open.")
+        .task(id: primary) {
+            while !Task.isCancelled {
+                if let ip = await PublicIP.lookup() { address = ip; failed = false } else { failed = address == nil }
+                try? await Task.sleep(for: .seconds(600))
+            }
+        }
+    }
+}
+
+enum PublicIP {
+    /// The public IPv4 (or IPv6) address, or nil when offline / blocked.
+    static func lookup() async -> String? {
+        guard let url = URL(string: "https://api.ipify.org") else { return nil }
+        var req = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 5)
+        req.setValue("Apex Activity Manager", forHTTPHeaderField: "User-Agent")
+        guard let (data, resp) = try? await URLSession.shared.data(for: req),
+              (resp as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+        let s = String(decoding: data.prefix(64), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        return isAddress(s) ? s : nil
+    }
+
+    static func isAddress(_ s: String) -> Bool {
+        var v4 = in_addr(), v6 = in6_addr()
+        return inet_pton(AF_INET, s, &v4) == 1 || inet_pton(AF_INET6, s, &v6) == 1
     }
 }
 
@@ -1056,6 +1289,10 @@ struct PageHeader: View {
     var subtitleColor: Color = .secondary
     /// Optional icon buttons shown before the time-range button.
     var accessory: AnyView? = nil
+    /// Pages without a graph (Display) leave out the time-range button.
+    var showsRange = true
+    /// This page's own Record button (records only its resource).
+    var record: RecordScope? = nil
 
     var body: some View {
         HStack(alignment: .center) {
@@ -1068,7 +1305,8 @@ struct PageHeader: View {
             Spacer(minLength: 16)
             HStack(spacing: 8) {
                 if let accessory { accessory }
-                RangePicker()
+                if let record { RecordButton(scope: record, compact: true) }
+                if showsRange { RangePicker() }
             }
         }
     }

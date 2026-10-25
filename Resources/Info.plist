@@ -9,12 +9,14 @@
     <key>CFBundleIdentifier</key><string>com.taskmanager.mac.native</string>
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>NSLocalNetworkUsageDescription</key>
-	<string>Apex asks your router for its name and model (UPnP) to show on the Network page. Nothing leaves your network.</string>
+	<string>Apex asks your router for its name and model (UPnP) to show on the Network page, and finds AirPlay displays for the Display page. Nothing leaves your network.</string>
+    <key>NSBonjourServices</key>
+    <array><string>_airplay._tcp</string></array>
 	<key>CFBundleName</key><string>Apex Activity Manager</string>
     <key>NSHumanReadableCopyright</key><string>© 2026 CyberNet Labs. All rights reserved.</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>1.1.0</string>
-    <key>CFBundleVersion</key><string>3</string>
+    <key>CFBundleShortVersionString</key><string>1.2.0</string>
+    <key>CFBundleVersion</key><string>4</string>
     <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>NSHighResolutionCapable</key><true/>

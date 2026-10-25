@@ -70,7 +70,7 @@ enum DiskCleaner {
         let kinds = CleanCategory.Kind.allCases
         let results = UnsafeMutableBufferPointer<CleanCategory?>.allocate(capacity: kinds.count)
         results.initialize(repeating: nil)
-        defer { results.deallocate() }
+        defer { _ = results.deinitialize(); results.deallocate() }   // deinitialize, or the item arrays leak
         // Categories are independent, so size them in parallel.
         DispatchQueue.concurrentPerform(iterations: kinds.count) { idx in
             let kind = kinds[idx]

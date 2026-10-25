@@ -116,10 +116,11 @@ struct StorageDevice: Sendable, Identifiable, Hashable {
 
 struct NetworkDevice: Sendable, Identifiable, Hashable {
     var id: String               // BSD name, e.g. "en7"
-    var name: String             // "USB 10/100/1000 LAN", "iPhone USB"
-    var connection: String       // "USB" / "Thunderbolt"
-    var kind: String             // "Ethernet", "Wi-Fi"…
+    var name: String             // tab name: "Wi-Fi", "Ethernet", "Ethernet 2", "VPN"…
+    var connection: String       // "USB" / "Thunderbolt" / "Built-in" / "VPN"
+    var kind: String             // "Ethernet", "Wi-Fi", "VPN"…
     var hardwareAddress: String
+    var adapter = ""             // what macOS calls it, e.g. "USB 10/100/1000 LAN"
     var usb: USBLink? = nil
     // Live values
     var inPerSec: Double = 0
@@ -348,15 +349,43 @@ final class DeviceScanner {
                           Self.kindName(SCNetworkInterfaceGetInterfaceType(i) as String?),
                           SCNetworkInterfaceGetHardwareAddressString(i) as String? ?? "")
         }
+        // The Wi-Fi card, built-in Ethernet ports and every plugged-in adapter.
+        // Thunderbolt ports (members of Thunderbolt Bridge) aren't connections, and
+        // macOS's virtual "Ethernet Adapter (enN)" interfaces aren't built-in ports.
         var out: [NetworkDevice] = []
         IOKitUtil.forEach(matching: "IONetworkInterface") { nif in
-            guard let bsd = IOKitUtil.property(nif, "BSD Name") as? String,
-                  let connection = Self.externalConnection(nif) else { return }
+            guard let bsd = IOKitUtil.property(nif, "BSD Name") as? String else { return }
             let n = names[bsd]
-            out.append(NetworkDevice(id: bsd, name: n?.name ?? bsd, connection: connection,
-                                     kind: n?.kind ?? "Network", hardwareAddress: n?.mac ?? "", usb: USBLink.above(nif)))
+            let kind = n?.kind ?? "Network"
+            let external = Self.externalConnection(nif)
+            if external == nil {
+                let builtin = (IOKitUtil.property(nif, "IOBuiltin") as? Bool) == true
+                guard kind == "Wi-Fi" || (kind == "Ethernet" && builtin && !(n?.name ?? "").hasPrefix("Thunderbolt")) else { return }
+            }
+            out.append(NetworkDevice(id: bsd, name: n?.name ?? bsd, connection: external ?? "Built-in",
+                                     kind: kind, hardwareAddress: n?.mac ?? "", adapter: n?.name ?? bsd,
+                                     usb: USBLink.above(nif)))
         }
-        network = out.sorted { $0.id.localizedStandardCompare($1.id) == .orderedAscending }
+        network = Self.named(out)
+    }
+
+    /// Wi-Fi first, then wired ports as "Ethernet", "Ethernet 2"… (built-in first).
+    static func named(_ list: [NetworkDevice]) -> [NetworkDevice] {
+        func rank(_ d: NetworkDevice) -> Int { d.kind == "Wi-Fi" ? 0 : d.kind == "Ethernet" ? (d.connection == "Built-in" ? 1 : 2) : 3 }
+        var out = list.sorted { (rank($0), $0.id.count, $0.id) < (rank($1), $1.id.count, $1.id) }
+        var wired = 0
+        for i in out.indices {
+            switch out[i].kind {
+            case "Wi-Fi": out[i].name = "Wi-Fi"
+            case "Ethernet":
+                wired += 1
+                out[i].name = wired == 1 ? "Ethernet" : "Ethernet \(wired)"
+            default:
+                // Phones and other adapters keep their own name ("iPhone USB").
+                break
+            }
+        }
+        return out
     }
 
     /// "USB" / "Thunderbolt" if the interface hangs off a plugged-in device;
@@ -389,10 +418,26 @@ final class DeviceScanner {
         }
     }
 
-    /// Live rates for each plugged-in interface from the per-interface counters.
+    /// Live rates for each connection from the per-interface counters, plus
+    /// any VPN tunnel that has an address right now.
     func readNetwork(_ perInterface: [String: InterfaceCounters], seconds secs: Double) -> [NetworkDevice] {
-        var out = network
         var store: SCDynamicStore?
+        var out = network
+        let tunnels = perInterface.keys.filter { k in
+            (k.hasPrefix("utun") || k.hasPrefix("ipsec") || k.hasPrefix("ppp")) && perInterface[k]?.up == true
+        }.sorted { ($0.count, $0) < ($1.count, $1) }
+        if !tunnels.isEmpty {
+            store = SCDynamicStoreCreate(nil, "Apex" as CFString, nil, nil)
+            var vpn: [NetworkDevice] = []
+            for t in tunnels {
+                // macOS keeps idle system tunnels (IPv6 link-local only); a VPN has an IPv4 address.
+                guard let store, SCDynamicStoreCopyValue(store, "State:/Network/Interface/\(t)/IPv4" as CFString) != nil else { continue }
+                let service = vpnName(t, store)
+                vpn.append(NetworkDevice(id: t, name: vpn.isEmpty ? "VPN" : "VPN \(vpn.count + 1)", connection: "VPN",
+                                         kind: "VPN", hardwareAddress: "", adapter: service))
+            }
+            out += vpn
+        }
         for i in out.indices {
             guard let c = perInterface[out[i].id] else { continue }
             out[i].totalIn = c.rx; out[i].totalOut = c.tx; out[i].linkSpeed = c.baud; out[i].isUp = c.up
@@ -407,6 +452,27 @@ final class DeviceScanner {
         }
         previousNet = perInterface.mapValues { ($0.rx, $0.tx) }
         return out
+    }
+
+    private var vpnNames: [String: String] = [:]
+
+    /// The VPN's name as set up in System Settings, if macOS knows it
+    /// (cached per tunnel; VPN apps that manage their own tunnel may not say).
+    private func vpnName(_ tunnel: String, _ store: SCDynamicStore) -> String {
+        if let n = vpnNames[tunnel] { return n }
+        var name = ""
+        let keys = SCDynamicStoreCopyKeyList(store, "State:/Network/Service/.*/IPv4" as CFString) as? [String] ?? []
+        for k in keys {
+            guard let v = SCDynamicStoreCopyValue(store, k as CFString) as? [String: Any],
+                  v["InterfaceName"] as? String == tunnel else { continue }
+            let id = k.split(separator: "/").dropFirst(3).first.map(String.init) ?? ""
+            if let setup = SCDynamicStoreCopyValue(store, "Setup:/Network/Service/\(id)" as CFString) as? [String: Any] {
+                name = setup["UserDefinedName"] as? String ?? ""
+            }
+            break
+        }
+        vpnNames[tunnel] = name
+        return name
     }
 }
 

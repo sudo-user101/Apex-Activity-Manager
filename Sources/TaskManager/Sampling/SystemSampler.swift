@@ -86,18 +86,19 @@ final class SystemSampler {
         }
         s.uptime = bootTime.map { Date().timeIntervalSince($0) } ?? 0
         s.thermal = ProcessInfo.processInfo.thermalState
-        s.systemPower = Self.systemPower()
+        let p = Self.power()
+        s.systemPower = p.load; s.chargerPower = p.charger; s.batteryFlow = p.battery
         return s
     }
 
     private static let battery: io_service_t = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSmartBattery"))
 
-    /// PowerTelemetryData.SystemLoad (mW) from the battery controller.
-    private static func systemPower() -> Double? {
-        guard battery != 0,
-              let t = IOKitUtil.property(battery, "PowerTelemetryData") as? [String: Any],
-              let mw = (t["SystemLoad"] as? NSNumber)?.doubleValue, mw > 0 else { return nil }
-        return mw / 1000
+    /// PowerTelemetryData from the battery controller (watts): the whole Mac's
+    /// use (SystemLoad), power coming in from the charger (SystemPowerIn), and
+    /// the battery's flow (BatteryPower, signed: + charging, − draining).
+    private static func power() -> (load: Double?, charger: Double?, battery: Double?) {
+        guard battery != 0, let t = IOKitUtil.property(battery, "PowerTelemetryData") as? [String: Any] else { return (nil, nil, nil) }
+        return PowerTelemetry.parse(t)
     }
 
     // MARK: CPU
@@ -332,5 +333,16 @@ enum IOKitUtil {
 
     static func property(_ entry: io_registry_entry_t, _ key: String) -> Any? {
         IORegistryEntryCreateCFProperty(entry, key as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue()
+    }
+}
+
+enum PowerTelemetry {
+    /// Pure: tested. Values are milliwatts; BatteryPower is a signed number
+    /// stored as an unsigned 64-bit value.
+    static func parse(_ t: [String: Any]) -> (load: Double?, charger: Double?, battery: Double?) {
+        let load = (t["SystemLoad"] as? NSNumber)?.doubleValue
+        let input = (t["SystemPowerIn"] as? NSNumber)?.doubleValue
+        let flow = (t["BatteryPower"] as? NSNumber).map { Double(Int64(bitPattern: $0.uint64Value)) }
+        return (load.flatMap { $0 > 0 ? $0 / 1000 : nil }, input.map { $0 / 1000 }, flow.map { $0 / 1000 })
     }
 }

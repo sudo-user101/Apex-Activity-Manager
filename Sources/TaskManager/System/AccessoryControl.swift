@@ -72,18 +72,26 @@ enum AccessoryControl {
         var id: String { address }
         let address: String
         let name: String
+        let type: BluetoothType
+        let typeIsGuess: Bool   // not set by the user yet
         let connected: Bool
-        let kind: String        // "Audio", "Keyboard", "Mouse"…
     }
 
-    /// Paired devices and whether each is connected right now.
+    /// Paired devices with whether each is connected, and the type the user
+    /// set (or a guess from its Bluetooth class). `AccessoryStore` decides which
+    /// to show: connected ones and the ones used regularly.
     static func bluetoothDevices() -> [BluetoothDevice] {
         let paired = (IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice]) ?? []
+        let saved = BluetoothTypes.saved()
         return paired.map { d in
-            BluetoothDevice(address: d.addressString ?? "", name: d.name ?? d.addressString ?? "Bluetooth device",
-                            connected: d.isConnected(), kind: kind(major: d.deviceClassMajor, minor: d.deviceClassMinor))
+            let address = d.addressString ?? ""
+            let name = d.name ?? address
+            let set = saved[address]
+            return BluetoothDevice(address: address, name: name,
+                                   type: set ?? BluetoothType.guess(major: Int(d.deviceClassMajor), minor: Int(d.deviceClassMinor), name: name),
+                                   typeIsGuess: set == nil, connected: d.isConnected())
         }
-        .sorted { ($0.connected ? 0 : 1, $0.name) < ($1.connected ? 0 : 1, $1.name) }
+        .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
 
     /// Disconnects (on = false) or reconnects a paired device. nil on success.
@@ -93,19 +101,5 @@ enum AccessoryControl {
         if r == kIOReturnSuccess { return nil }
         return on ? "Couldn’t connect. Make sure the device is switched on and nearby."
                   : "Couldn’t disconnect it (error \(r))."
-    }
-
-    private static func kind(major: BluetoothDeviceClassMajor, minor: BluetoothDeviceClassMinor) -> String {
-        switch Int(major) {
-        case kBluetoothDeviceClassMajorAudio: return "Audio"
-        case kBluetoothDeviceClassMajorPeripheral:
-            if minor & 0x10 != 0 && minor & 0x20 == 0 { return "Keyboard" }
-            if minor & 0x20 != 0 { return "Mouse or trackpad" }
-            return "Input device"
-        case kBluetoothDeviceClassMajorPhone: return "Phone"
-        case kBluetoothDeviceClassMajorComputer: return "Computer"
-        case kBluetoothDeviceClassMajorWearable: return "Wearable"
-        default: return "Device"
-        }
     }
 }

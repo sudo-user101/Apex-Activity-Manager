@@ -50,7 +50,7 @@ final class Alerts: NSObject, UNUserNotificationCenterDelegate {
             return ByteCountFormatter.string(fromByteCount: Int64(max(0, v)), countStyle: .file)
         case .memoryGrowth, .swapGrowth:
             return ByteCountFormatter.string(fromByteCount: Int64(max(0, v)), countStyle: .memory)
-        case .diskWrites:
+        case .diskWrites, .network:
             return ByteCountFormatter.string(fromByteCount: Int64(max(0, v)), countStyle: .file) + "/s"
         }
     }
@@ -99,7 +99,8 @@ final class Alerts: NSObject, UNUserNotificationCenterDelegate {
         for p in s.processes where !p.restricted && p.uid == me {
             let key = p.appKey
             var a = apps[key] ?? AppLoad(key: key, name: names[p.bundlePath] ?? p.name, cpu: 0)
-            a.cpu += p.cpu; a.diskWritePerSec += p.diskWritePerSec; a.memory += p.memory; a.pids.append(p.pid)
+            a.cpu += p.cpu; a.diskWritePerSec += p.diskWritePerSec; a.netPerSec += p.netPerSec
+            a.memory += p.memory; a.pids.append(p.pid)
             apps[key] = a
         }
         let m = s.system.memory
@@ -109,7 +110,18 @@ final class Alerts: NSObject, UNUserNotificationCenterDelegate {
             memoryUsedPercent: m.percent, swapUsed: m.swapUsed, memoryTotal: m.total,
             thermal: ThermalState(rawValue: s.system.thermal.rawValue) ?? .nominal,
             diskAvailable: s.system.disk.available, diskCapacity: s.system.disk.capacity,
-            volumeName: s.system.disk.volumeName, diskWritePerSec: s.system.disk.writePerSec)
+            volumeName: s.system.disk.volumeName, diskWritePerSec: s.system.disk.writePerSec,
+            networkPerSec: s.system.network.inPerSec + s.system.network.outPerSec)
+    }
+
+    /// A plain notification from a feature (not an alert rule), e.g. a finished
+    /// cloud offload. Shown even if alert rules are off, if macOS allows Apex.
+    func notify(id: String, title: String, body: String) {
+        let c = UNMutableNotificationContent()
+        c.title = title
+        c.body = body
+        c.sound = .default
+        center.add(UNNotificationRequest(identifier: id, content: c, trigger: nil))
     }
 
     private func post(_ e: DetectionEvent) {

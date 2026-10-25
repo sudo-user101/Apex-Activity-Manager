@@ -4,6 +4,23 @@ import SwiftUI
 /// they hold, token throughput where available, and one-click relief
 /// (unload a model, optimize, or quit) before the Mac runs out of memory.
 struct LocalAIView: View {
+    @AppStorage("localAITab") private var tab = "runtimes"
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Picker("", selection: $tab) {
+                Text("Models").tag("runtimes")
+                Text("Assistant").tag("assistant")
+            }
+            .pickerStyle(.segmented).labelsHidden().fixedSize()
+            .padding(.top, 12).padding(.bottom, 4)
+            if tab == "assistant" { AssistantView() } else { LocalAIRuntimesView() }
+        }
+    }
+}
+
+/// Local AI › Models: runtimes, loaded and installed models.
+struct LocalAIRuntimesView: View {
     @Environment(AppModel.self) private var model
     @State private var api: [String: AIRuntime] = [:]          // last API results by runtime name
     @State private var tokenHistory: [String: (tokens: UInt64, at: Date)] = [:]

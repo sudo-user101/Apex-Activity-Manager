@@ -1,5 +1,6 @@
 import XCTest
 import FanControlCore
+@testable import TaskManager
 
 final class FanControlTests: XCTestCase {
     let temps = FanControl.Temps(cpu: 60, gpu: 45, hottest: 70)
@@ -188,5 +189,36 @@ final class NightChargingTests: XCTestCase {
         XCTAssertEqual(FanControl.nextNightCheck(night, now: at(27, 5, 50), calendar: cal), at(27, 6, 5))   // exactly at top-up
         XCTAssertEqual(FanControl.nextNightCheck(night, now: at(27, 15), calendar: cal), at(27, 20))        // tonight's start
         XCTAssertNil(FanControl.nextNightCheck(nil, now: at(27, 15), calendar: cal))
+    }
+}
+
+final class StayAwakeTests: XCTestCase {
+    let now = Date(timeIntervalSince1970: 1_800_000_000)
+
+    func testHelperOnlyHonoursFreshRenewals() {
+        XCTAssertFalse(FanControl.sleepDisabled(until: nil, now: now))
+        XCTAssertTrue(FanControl.sleepDisabled(until: now.addingTimeInterval(180), now: now))
+        XCTAssertFalse(FanControl.sleepDisabled(until: now.addingTimeInterval(-1), now: now), "lapsed: Apex stopped renewing")
+        XCTAssertFalse(FanControl.sleepDisabled(until: now.addingTimeInterval(86400), now: now), "a far-future time is ignored")
+    }
+
+    @MainActor func testLidClosedRules() {
+        func d(_ enabled: Bool = true, app: Bool = true, ac: Bool, battery: Bool = false, since: Double? = nil, max: Int = 60) -> Bool {
+            LidAwake.decide(enabled: enabled, appRunning: app, onAC: ac, allowOnBattery: battery,
+                            onBatterySince: since.map { now.addingTimeInterval(-$0) }, batteryMinutes: max, now: now)
+        }
+        XCTAssertTrue(d(ac: true), "on power with a chosen app open")
+        XCTAssertFalse(d(app: false, ac: true), "no chosen app open")
+        XCTAssertFalse(d(false, ac: true), "switched off")
+        XCTAssertFalse(d(ac: false, since: 60), "battery not allowed")
+        XCTAssertTrue(d(ac: false, battery: true, since: 600, max: 30))
+        XCTAssertFalse(d(ac: false, battery: true, since: 1900, max: 30), "allowance used up")
+        XCTAssertFalse(d(ac: false, battery: true, since: 3700, max: 600), "never more than an hour")
+    }
+
+    func testOldConfigWithoutStayAwakeDecodes() {
+        let json = #"{"heartbeat": 1800000000, "fans": [], "chargeLimit": 80}"#
+        XCTAssertNil(FanControl.decode(Data(json.utf8))?.stayAwakeUntil)
+        XCTAssertEqual(FanControl.decode(Data(json.utf8))?.chargeLimit, 80)
     }
 }

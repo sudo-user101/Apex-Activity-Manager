@@ -104,3 +104,33 @@ final class BootMediaTests: XCTestCase {
         XCTAssertTrue(answer.contains("BypassNRO"))
     }
 }
+
+final class SetupOptionsTests: XCTestCase {
+    func testNameTimeZoneAndEncryptionGoInSpecialize() throws {
+        var o = WindowsSetupOptions()
+        o.computerName = "Office PC #1"
+        o.timeZone = "South Africa Standard Time"
+        o.noAutoEncryption = true
+        let xml = try XCTUnwrap(Autounattend.xml(o, arch: .amd64))
+        XCTAssertNoThrow(try XMLDocument(xmlString: xml), "well-formed")
+        XCTAssertTrue(xml.contains("<settings pass=\"specialize\">"))
+        XCTAssertTrue(xml.contains("<ComputerName>OfficePC1</ComputerName>"))
+        XCTAssertTrue(xml.contains("<TimeZone>South Africa Standard Time</TimeZone>"))
+        XCTAssertTrue(xml.contains("PreventDeviceEncryption"))
+    }
+
+    func testComputerNameRules() {
+        XCTAssertEqual(Autounattend.cleanComputerName("my-very-long-computer-name"), "my-very-long-co", "15 characters at most")
+        XCTAssertEqual(Autounattend.cleanComputerName("12345"), "", "all digits isn't allowed")
+        XCTAssertEqual(Autounattend.cleanComputerName("Zoë's PC"), "ZosPC", "letters A–Z, digits and hyphens only")
+    }
+
+    func testTimeZoneFromMac() {
+        XCTAssertEqual(Autounattend.windowsTimeZone(TimeZone(identifier: "Africa/Johannesburg")!), "South Africa Standard Time")
+        XCTAssertEqual(Autounattend.windowsTimeZone(TimeZone(identifier: "Pacific/Fiji")!), "", "unknown: Windows asks")
+    }
+
+    func testDriversFolderNameIsTheOneSetupLooksFor() {
+        XCTAssertEqual(BootMedia.driversFolder, "$WinPEDriver$")
+    }
+}

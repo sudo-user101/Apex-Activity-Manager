@@ -19,6 +19,12 @@ struct WindowsSetupOptions: Equatable, Sendable {
     var minimalPrivacy = false
     /// winget package IDs installed at first sign-in (needs internet then).
     var apps: [String] = []
+    /// The PC's name (empty = Windows picks one). Up to 15 letters, digits and hyphens.
+    var computerName = ""
+    /// Windows time zone ID, e.g. "South Africa Standard Time" (empty = ask).
+    var timeZone = ""
+    /// Stop Windows from turning on device encryption (BitLocker) by itself.
+    var noAutoEncryption = false
 
     var isEmpty: Bool { self == WindowsSetupOptions() }
     var bypassesChecks: Bool { skipTPM || skipSecureBoot || skipRAM }
@@ -75,11 +81,27 @@ enum Autounattend {
             passes.append(pass("windowsPE", archs.map { component("Microsoft-Windows-Setup", $0, runSync(cmds, tag: "RunSynchronous", item: "RunSynchronousCommand", field: "Path")) }))
         }
 
-        // specialize: lets the out-of-box setup offer "I don't have internet".
+        // specialize: offline setup, automatic encryption, PC name and time zone.
+        var special: [String] = []
+        var specialCmds: [String] = []
         if o.allowOfflineAccount {
-            let cmd = "reg add HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\OOBE /v BypassNRO /t REG_DWORD /d 1 /f"
-            passes.append(pass("specialize", archs.map { component("Microsoft-Windows-Deployment", $0, runSync([cmd], tag: "RunSynchronous", item: "RunSynchronousCommand", field: "Path")) }))
+            // Lets the out-of-box setup offer "I don't have internet".
+            specialCmds.append("reg add HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\OOBE /v BypassNRO /t REG_DWORD /d 1 /f")
         }
+        if o.noAutoEncryption {
+            specialCmds.append("reg add HKLM\\SYSTEM\\CurrentControlSet\\Control\\BitLocker /v PreventDeviceEncryption /t REG_DWORD /d 1 /f")
+        }
+        if !specialCmds.isEmpty {
+            special += archs.map { component("Microsoft-Windows-Deployment", $0, runSync(specialCmds, tag: "RunSynchronous", item: "RunSynchronousCommand", field: "Path")) }
+        }
+        let pc = cleanComputerName(o.computerName)
+        var shellSpecial: [String] = []
+        if !pc.isEmpty { shellSpecial.append("<ComputerName>\(escape(pc))</ComputerName>") }
+        if !o.timeZone.isEmpty { shellSpecial.append("<TimeZone>\(escape(o.timeZone))</TimeZone>") }
+        if !shellSpecial.isEmpty {
+            special += archs.map { component("Microsoft-Windows-Shell-Setup", $0, shellSpecial.joined(separator: "\n")) }
+        }
+        if !special.isEmpty { passes.append(pass("specialize", special)) }
 
         // oobeSystem: region, privacy, account, first sign-in tasks.
         var oobe: [String] = []
@@ -138,6 +160,28 @@ enum Autounattend {
         let script = "for($i=0;$i -lt 60 -and -not (Get-Command winget -ErrorAction SilentlyContinue);$i++){Start-Sleep 10};"
             + "foreach($id in @(\(list))){winget install --id $id -e --silent --accept-package-agreements --accept-source-agreements}"
         return "powershell -NoProfile -ExecutionPolicy Bypass -Command \"\(script)\""
+    }
+
+    /// Computer names: up to 15 letters, digits and hyphens, not all digits.
+    static func cleanComputerName(_ s: String) -> String {
+        let n = String(s.filter { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-") }.prefix(15))
+        return n.allSatisfy(\.isNumber) ? "" : n
+    }
+
+    /// The Windows time zone for this Mac's, for the most common zones (else empty: Windows asks).
+    static func windowsTimeZone(_ tz: TimeZone = .current) -> String {
+        let map = ["Africa/Johannesburg": "South Africa Standard Time", "Europe/London": "GMT Standard Time",
+                   "Europe/Berlin": "W. Europe Standard Time", "Europe/Paris": "Romance Standard Time",
+                   "Europe/Amsterdam": "W. Europe Standard Time", "Africa/Lagos": "W. Central Africa Standard Time",
+                   "Africa/Nairobi": "E. Africa Standard Time", "Africa/Cairo": "Egypt Standard Time",
+                   "America/New_York": "Eastern Standard Time", "America/Chicago": "Central Standard Time",
+                   "America/Denver": "Mountain Standard Time", "America/Los_Angeles": "Pacific Standard Time",
+                   "America/Toronto": "Eastern Standard Time", "America/Sao_Paulo": "E. South America Standard Time",
+                   "Asia/Dubai": "Arabian Standard Time", "Asia/Kolkata": "India Standard Time",
+                   "Asia/Shanghai": "China Standard Time", "Asia/Tokyo": "Tokyo Standard Time",
+                   "Asia/Singapore": "Singapore Standard Time", "Australia/Sydney": "AUS Eastern Standard Time",
+                   "UTC": "UTC", "GMT": "UTC"]
+        return map[tz.identifier] ?? ""
     }
 
     /// Windows user names: up to 20 characters, none of " / \ [ ] : ; | = , + * ? < > @.

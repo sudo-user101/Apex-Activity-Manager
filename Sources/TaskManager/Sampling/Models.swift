@@ -163,6 +163,8 @@ struct SystemSnapshot: Sendable {
     var uptime: TimeInterval = 0
     /// Whole-Mac power draw (W) where the hardware reports it (laptops).
     var systemPower: Double?
+    var chargerPower: Double?          // W coming in from the charger
+    var batteryFlow: Double?           // W, + charging, − draining
     var processCount = 0
     var threadCount = 0
     var thermal: ProcessInfo.ThermalState = .nominal
@@ -208,6 +210,9 @@ struct History: Sendable {
     var gpu: [Double] = []
     var gpuAI: [Double] = []          // GPU % used by local AI runtimes (0 when none)
     var power: [Double] = []
+    var chargerIn: [Double] = []
+    var batteryCharging: [Double] = []
+    var batteryDraining: [Double] = []
     /// Per-device read/write or in/out, each with its own timestamps (devices
     /// come and go, so they can't share `times`). Keyed "disk:<id>" / "net:<id>".
     var devices: [String: DeviceSeries] = [:]
@@ -235,6 +240,8 @@ struct History: Sendable {
         gpu.append(s.gpu.utilization ?? 0)
         gpuAI.append(aiGPU)
         power.append(s.systemPower ?? 0)
+        chargerIn.append(s.chargerPower ?? 0)
+        batteryCharging.append(max(0, s.batteryFlow ?? 0)); batteryDraining.append(max(0, -(s.batteryFlow ?? 0)))
         var present = Set<String>()
         for d in s.storageDevices {
             let k = "disk:" + d.id; present.insert(k)
@@ -257,7 +264,8 @@ struct History: Sendable {
     private mutating func trim(_ n: Int) {
         times.removeFirst(n)
         for k in [\History.cpu, \.cpuUser, \.cpuSystem, \.memory, \.pressure, \.memOpen, \.memSystem, \.memCompressed,
-                  \.memCache, \.memAvailable, \.memFree, \.memSwap, \.diskRead, \.diskWrite, \.netIn, \.netOut, \.gpu, \.gpuAI, \.power] as [WritableKeyPath<History, [Double]>] {
+                  \.memCache, \.memAvailable, \.memFree, \.memSwap, \.diskRead, \.diskWrite, \.netIn, \.netOut, \.gpu, \.gpuAI, \.power,
+                  \.chargerIn, \.batteryCharging, \.batteryDraining] as [WritableKeyPath<History, [Double]>] {
             self[keyPath: k].removeFirst(min(n, self[keyPath: k].count))
         }
         pressureLevels.removeFirst(min(n, pressureLevels.count))

@@ -11,6 +11,7 @@ final class HardwareStore {
     private(set) var bluetooth: [BluetoothBattery] = []
     private(set) var sensors = SensorSnapshot()
     private(set) var cpuTempHistory: [Double] = []
+    private(set) var gpuTempHistory: [Double] = []
     private(set) var cpuTempTimes: [Date] = []
     private(set) var loaded = false
     /// Battery charge every minute for the last 12 hours (recorded even
@@ -76,9 +77,12 @@ final class HardwareStore {
         let s = await Task.detached(priority: .utility) { Sensors.shared.read() }.value
         sensors = s
         cpuTempHistory.append(s.cpuTemp ?? 0)
+        gpuTempHistory.append(s.gpuTemp ?? 0)
         cpuTempTimes.append(Date())
         let cutoff = Date().addingTimeInterval(-History.window)
-        while cpuTempTimes.count > 1 && cpuTempTimes[1] < cutoff { cpuTempTimes.removeFirst(); cpuTempHistory.removeFirst() }
+        while cpuTempTimes.count > 1 && cpuTempTimes[1] < cutoff {
+            cpuTempTimes.removeFirst(); cpuTempHistory.removeFirst(); gpuTempHistory.removeFirst()
+        }
         if doBattery || !loaded {
             let (b, bt) = await Task.detached(priority: .utility) { (Battery.read(), Battery.bluetooth()) }.value
             battery = b
@@ -94,6 +98,7 @@ final class HardwareStore {
 struct EnergyDetail: View {
     @Environment(AppModel.self) private var model
     @Environment(\.graphTimeline) private var timeline
+    @Environment(\.advancedGraph) private var advanced
     let store: HardwareStore
     @State private var sleepBlockers: [pid_t: [String]] = [:]
     @AppStorage("energySortKey") private var sortKey = "power"
@@ -110,61 +115,18 @@ struct EnergyDetail: View {
                        accessory: AnyView(HStack(spacing: 8) {
                            AccessoriesButton(store: store)
                            if store.hasBattery { ChargeLimitButton() }
-                       }))
-            NativeOutline(rows: rows, columns: EnergyRow.columns, autosaveName: "EnergyOutline.v1",
-                          selection: [], sortKey: sortKey, sortAscending: sortAscending,
-                          isExpanded: { _ in false }, onSelect: { _ in },
-                          onSort: { sortKey = $0; sortAscending = $1 }, onExpand: { _, _ in },
-                          onDoubleClick: { id in if let pid = pid_t(id.dropFirst(2)) { model.reveal(pid: pid) } },
-                          menu: { ids in ProcessMenu.make(model: model, pids: ids.compactMap { pid_t($0.dropFirst(2)) }) },
-                          popover: { id in pid_t(id.dropFirst(2)).map { AnyView(ProcessDetailPopover(pid: $0)) } })
-                .frame(height: 300)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.separator, lineWidth: 0.5))
-            Text("Power is the energy each app’s CPU work uses right now; Today is the total so far. System processes need admin rights to measure.")
-                .font(.caption).foregroundStyle(.tertiary)
-
-            // Bottom panel: energy graph | battery graph | numbers.
-            HStack(alignment: .top, spacing: 18) {
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        Text("POWER DRAW").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                        Spacer()
-                        RangeCaption()
-                    }
-                    let limits = PowerLevel.limits(laptop: store.hasBattery)
-                    let power = model.history.power
-                    LevelAreaGraph(values: power, colors: power.map { PowerLevel.color($0, limits) },
-                                   maxValue: max(limits.high * 1.25, visibleValues(power, timeline).max() ?? 0), name: "Whole Mac")
-                        .environment(\.graphUnit, .watts)
-                        .frame(height: 110)
-                    let now = b.systemPower ?? power.last ?? 0
-                    HStack(spacing: 6) {
-                        Circle().fill(PowerLevel.color(now, limits)).frame(width: 8, height: 8)
-                        Text(String(format: "Whole Mac: %.1f W · ", now) + PowerLevel.label(now, limits))
-                    }
-                    .font(.caption).monospacedDigit().foregroundStyle(.secondary)
-                }
-                if store.hasBattery {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("BATTERY (LAST 12 HOURS)").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                        ChargeGraph(values: store.chargeHistory)
-                            .frame(height: 110)
-                        Text(store.chargeHistory.count < 2 ? "Recording — fills in over time" : "One point per minute")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                    VStack(alignment: .leading, spacing: 10) {
-                        stat("Remaining charge", "\(b.percent)%")
-                        stat("Charge limit", FanController.shared.chargeLimit.map { "\($0)%" + (FanController.shared.status?.chargingBlocked == true ? " · holding" : "") } ?? "Off")
-                        stat(b.isCharging ? "Time until full" : "Time until empty",
-                             b.minutesRemaining.map { Fmt.minutes($0) } ?? (b.fullyCharged ? "—" : "Calculating…"))
-                        stat("Time on battery", store.onBatterySince.map { Fmt.duration(Date().timeIntervalSince($0)) } ?? (b.onAC ? "On power adapter" : "—"))
-                    }
-                    .frame(width: 190, alignment: .leading)
-                }
+                           StayAwakeButton()
+                       }), record: .energy)
+            // The graphs first: with Advanced graph, the big power graph, then the
+            // apps using power, then the two smaller graphs and the numbers.
+            if advanced {
+                PowerDetail(store: store, appsWatts: rows.filter { !$0.restricted }.reduce(0) { $0 + $1.power })
+                appsTable(rows)
+                graphsPanel(b)
+            } else {
+                graphsPanel(b)
+                appsTable(rows)
             }
-            .padding(14)
-            .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
 
             if store.hasBattery {
                 statGrid([
@@ -174,6 +136,8 @@ struct EnergyDetail: View {
                     (b.isCharging ? "Charging power" : "Battery power", String(format: "%.1f W", b.batteryPower)),
                     ("Temperature", b.temperature.map { String(format: "%.1f °C", $0) } ?? "—"),
                     ("Power adapter", b.onAC ? (b.adapterWatts.map { "\($0) W" + (b.adapterName.map { " · \($0)" } ?? "") } ?? "Connected") : "Not connected"),
+                    ("Accessories", !AccessoryStore.shared.loaded ? "Checking…" : AccessoryStore.shared.connectedCount == 0 ? "None connected"
+                        : "\(AccessoryStore.shared.connectedCount) · up to " + String(format: "%.1f W", AccessoryStore.shared.maxWatts)),
                 ])
             }
             if !store.bluetooth.isEmpty {
@@ -194,6 +158,67 @@ struct EnergyDetail: View {
                 try? await Task.sleep(for: .seconds(5))
             }
         }
+    }
+
+    @ViewBuilder private func appsTable(_ rows: [EnergyRow]) -> some View {
+            NativeOutline(rows: rows, columns: EnergyRow.columns, autosaveName: "EnergyOutline.v1",
+                      selection: [], sortKey: sortKey, sortAscending: sortAscending,
+                      isExpanded: { _ in false }, onSelect: { _ in },
+                      onSort: { sortKey = $0; sortAscending = $1 }, onExpand: { _, _ in },
+                      onDoubleClick: { id in if let pid = pid_t(id.dropFirst(2)) { model.reveal(pid: pid) } },
+                      menu: { ids in ProcessMenu.make(model: model, pids: ids.compactMap { pid_t($0.dropFirst(2)) }) },
+                      popover: { id in pid_t(id.dropFirst(2)).map { AnyView(ProcessDetailPopover(pid: $0)) } })
+            .frame(height: 300)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.separator, lineWidth: 0.5))
+        Text("Power is the energy each app’s CPU work uses right now; Today is the total so far. System processes need admin rights to measure.")
+            .font(.caption).foregroundStyle(.tertiary)
+
+    }
+
+    /// Power draw graph | battery graph | numbers.
+    @ViewBuilder private func graphsPanel(_ b: BatteryInfo) -> some View {
+            HStack(alignment: .top, spacing: 18) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("POWER DRAW").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    Spacer()
+                    RangeCaption()
+                }
+                let limits = PowerLevel.limits(laptop: store.hasBattery)
+                let power = model.history.power
+                LevelAreaGraph(values: power, colors: power.map { PowerLevel.color($0, limits) },
+                               maxValue: max(limits.high * 1.25, visibleValues(power, timeline).max() ?? 0), name: "Whole Mac")
+                    .environment(\.graphUnit, .watts)
+                    .frame(height: 110)
+                let now = b.systemPower ?? power.last ?? 0
+                HStack(spacing: 6) {
+                    Circle().fill(PowerLevel.color(now, limits)).frame(width: 8, height: 8)
+                    Text(String(format: "Whole Mac: %.1f W · ", now) + PowerLevel.label(now, limits))
+                }
+                .font(.caption).monospacedDigit().foregroundStyle(.secondary)
+            }
+            if store.hasBattery {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("BATTERY (LAST 12 HOURS)").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    ChargeGraph(values: store.chargeHistory)
+                        .frame(height: 110)
+                    Text(store.chargeHistory.count < 2 ? "Recording — fills in over time" : "One point per minute")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                VStack(alignment: .leading, spacing: 10) {
+                    stat("Power mode", PowerMode.current().title)
+                    stat("Charge limit", FanController.shared.chargeLimit.map { "\($0)%" + (FanController.shared.status?.chargingBlocked == true ? " · holding" : "") } ?? "Off")
+                    stat(b.isCharging ? "Time until full" : "Time until empty",
+                         b.minutesRemaining.map { Fmt.minutes($0) } ?? (b.fullyCharged ? "—" : "Calculating…"))
+                    stat("Time on battery", store.onBatterySince.map { Fmt.duration(Date().timeIntervalSince($0)) } ?? (b.onAC ? "On power adapter" : "—"))
+                }
+                .frame(width: 190, alignment: .leading)
+            }
+        }
+        .padding(14)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
+
     }
 
     private func status(_ b: BatteryInfo) -> String {
@@ -367,78 +392,150 @@ func statGrid(_ items: [(String, String)], extra: AnyView? = nil) -> some View {
 /// Energy header icon (next to the charge limit): connected accessories and
 /// the power macOS has allowed each one. Hubs and docks open into what's
 /// plugged into them; drives can be ejected.
+/// Wired (USB) and Bluetooth accessories, shared by the Accessories popover
+/// and the Energy page's Accessories figure. Bluetooth shows devices connected
+/// now plus the ones used regularly (`BluetoothUsage`).
+@MainActor @Observable
+final class AccessoryStore {
+    static let shared = AccessoryStore()
+
+    private(set) var usb: [USBAccessory] = []
+    private(set) var drives = Set<String>()          // USB serials of drives (mass storage)
+    private(set) var paired: [AccessoryControl.BluetoothDevice] = []
+    private(set) var regular = Set<String>()
+    private(set) var loaded = false
+    @ObservationIgnored private var wasConnected = Set<String>()
+
+    /// Connected now, or used regularly (and not removed).
+    var bluetooth: [AccessoryControl.BluetoothDevice] {
+        paired.filter { $0.connected || regular.contains($0.address) }
+            .sorted { ($0.connected ? 0 : 1, $0.name) < ($1.connected ? 0 : 1, $1.name) }
+    }
+    /// Wired devices that draw from the Mac (hubs counted by what's behind them).
+    var wired: [USBAccessory] { usb.flatMap(\.flattened).filter { !$0.isHub } }
+    var connectedCount: Int { wired.count + paired.filter(\.connected).count }
+    /// The most connected accessories can draw: USB allowances + Bluetooth estimates (upper end).
+    var maxWatts: Double {
+        usb.flatMap(\.flattened).reduce(0) { $0 + $1.maxWatts }
+            + paired.filter(\.connected).reduce(0) { $0 + ($1.type.typicalWatts?.upperBound ?? 0) }
+    }
+
+    func load() async {
+        let list = await Task.detached(priority: .utility) { Accessories.usb() }.value
+        if list != usb { usb = list }
+        let ms = await Task.detached(priority: .utility) { AccessoryControl.massStorageSerials() }.value
+        if ms != drives { drives = ms }
+        await reloadBluetooth()
+        loaded = true
+    }
+
+    func reloadBluetooth() async {
+        let bt = await Task.detached(priority: .utility) { AccessoryControl.bluetoothDevices() }.value
+        let connected = bt.filter(\.connected).map(\.address)
+        // A removed device comes back only after it disconnects and connects again.
+        BluetoothUsage.unhideIfConnected(connected.filter { !wasConnected.contains($0) && loaded })
+        wasConnected = Set(connected)
+        let reg = BluetoothUsage.record(connected: connected)
+        if bt != paired { paired = bt }
+        if reg != regular { regular = reg }
+    }
+
+    func remove(_ d: AccessoryControl.BluetoothDevice) {
+        BluetoothUsage.remove(d.address)
+        regular.remove(d.address)
+    }
+}
+
 struct AccessoriesButton: View {
     @Environment(AppModel.self) private var model
     let store: HardwareStore
-    @State private var usb: [USBAccessory] = []
-    @State private var loaded = false
+    private let acc = AccessoryStore.shared
     @State private var show = false
     @State private var expanded = Set<String>()
     @State private var message: String?
-    @State private var bluetooth: [AccessoryControl.BluetoothDevice] = []
     @State private var working = Set<String>()        // devices being stopped / resumed
-    @State private var drives = Set<String>()          // USB serials of drives (mass storage)
 
     var body: some View {
-        let all = usb.flatMap(\.flattened)
         Button { show.toggle() } label: {
             Image(systemName: "cable.connector.horizontal")
-                .foregroundStyle(all.isEmpty ? Color.secondary : Color.green)
+                .foregroundStyle(acc.connectedCount == 0 ? Color.secondary : Color.green)
         }
         .buttonStyle(.bordered)
-        .help(all.isEmpty ? "Accessories" : "Accessories: \(all.count) USB, up to " + String(format: "%.1f W", all.reduce(0) { $0 + $1.maxWatts }))
+        .help(acc.connectedCount == 0 ? "Accessories" : "Accessories: \(acc.connectedCount) connected, up to " + String(format: "%.1f W", acc.maxWatts))
         .popover(isPresented: $show, arrowEdge: .bottom) { popover.padding(16).frame(width: 480) }
         .task(id: model.snapshot.system.storageDevices.count) {
             while !Task.isCancelled {
-                await load()
+                await acc.load()
                 try? await Task.sleep(for: .seconds(60))
             }
         }
-        .onChange(of: show) { _, open in if open { message = nil; Task { await load() } } }
+        .onChange(of: show) { _, open in if open { message = nil; Task { await acc.load() } } }
     }
 
     private var popover: some View {
         let b = store.battery
-        let all = usb.flatMap(\.flattened)
+        let usb = acc.usb, loaded = acc.loaded, bluetooth = acc.bluetooth
         return VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text("Accessories").font(.headline)
                 Spacer()
-                if !all.isEmpty { Text("USB: up to " + String(format: "%.1f W", all.reduce(0) { $0 + $1.maxWatts })).foregroundStyle(.secondary).monospacedDigit() }
+                if acc.connectedCount > 0 {
+                    Text("\(acc.connectedCount) connected · up to " + String(format: "%.1f W", acc.maxWatts))
+                        .foregroundStyle(.secondary).monospacedDigit()
+                }
             }
             section("Power adapter") {
                 row("powerplug", store.hasBattery ? (b.onAC ? (b.adapterName ?? "Power adapter") : "Not connected") : "Built-in power supply",
                     detail: store.hasBattery && b.onAC ? "Supplies power to the Mac" : "",
                     value: store.hasBattery && b.onAC ? (b.adapterWatts.map { "\($0) W rated" } ?? "") : "")
             }
-            section("USB") {
+            section("Wired · \(acc.wired.count)") {
                 if !loaded { ProgressView().controlSize(.small) }
                 else if usb.isEmpty { Text("Nothing plugged in.").foregroundStyle(.secondary) }
                 ForEach(usb) { usbRow($0, depth: 0) }
             }
-            if !bluetooth.isEmpty {
-                section("Bluetooth") {
-                    ForEach(bluetooth) { d in
-                        let battery = store.bluetooth.first { $0.name == d.name }.map { "\($0.percent)% charged" } ?? ""
-                        HStack(spacing: 10) {
-                            Image(systemName: d.connected ? "wave.3.right" : "wave.3.right.circle").frame(width: 18)
-                                .foregroundStyle(d.connected ? Color.blue : .secondary)
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text(d.name)
-                                Text([d.kind, d.connected ? "Connected" : "Not connected", battery].filter { !$0.isEmpty }.joined(separator: " · "))
-                                    .font(.caption).foregroundStyle(.secondary)
+            section("Bluetooth · \(bluetooth.filter(\.connected).count)") {
+                if bluetooth.isEmpty { Text(loaded ? "Nothing connected." : "").foregroundStyle(.secondary) }
+                ForEach(bluetooth) { d in
+                    let battery = store.bluetooth.first { $0.name == d.name }.map { "\($0.percent)% charged" } ?? ""
+                    HStack(spacing: 10) {
+                        Image(systemName: d.type.symbol).frame(width: 18).foregroundStyle(d.connected ? Color.blue : .secondary)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(d.name)
+                            HStack(spacing: 4) {
+                                Menu {
+                                    Picker("Type", selection: Binding(get: { d.type }, set: { setType($0, for: d) })) {
+                                        ForEach(BluetoothType.allCases) { t in Label(t.title, systemImage: t.symbol).tag(t) }
+                                    }
+                                    .pickerStyle(.inline)
+                                } label: {
+                                    Text(d.type.title + (d.typeIsGuess ? " (guessed)" : ""))
+                                }
+                                .menuStyle(.borderlessButton).fixedSize()
+                                .help("What this device is. Apex uses it to estimate the device’s power use.")
+                                if !d.connected { Text("· not connected") }
+                                if !battery.isEmpty { Text("· " + battery) }
                             }
-                            Spacer()
-                            if working.contains(d.id) { ProgressView().controlSize(.small) }
-                            else {
-                                Button(d.connected ? "Disconnect" : "Connect") { setBluetooth(d, !d.connected) }.controlSize(.small)
-                            }
+                            .font(.caption).foregroundStyle(.secondary)
                         }
+                        Spacer()
+                        Text(d.connected ? (d.type.estimateText ?? "varies") : "—")
+                            .font(.callout).monospacedDigit().foregroundStyle(.secondary)
+                            .help("Estimate: typical power for a \(d.type.title.lowercased()) in use. macOS doesn’t measure it.")
+                        if working.contains(d.id) { ProgressView().controlSize(.small) }
+                        else {
+                            Button(d.connected ? "Disconnect" : "Connect") { setBluetooth(d, !d.connected) }.controlSize(.small)
+                        }
+                        Menu {
+                            Button("Remove from Accessories") { acc.remove(d) }
+                        } label: { Image(systemName: "ellipsis.circle") }
+                        .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                        .help("Remove it from this list. It stays paired with the Mac (System Settings › Bluetooth), and comes back if you start using it regularly again.")
                     }
                 }
             }
             if let message { Text(message).font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true) }
-            Text("macOS doesn’t measure each accessory’s real power use: USB figures are the most each device asked for and was allowed (current × 5 V). Stop pauses a drive without unplugging it (Reconnect also brings back a drive that was ejected), and Bluetooth devices can be disconnected and reconnected here. Other USB devices can’t be paused by apps, and no Mac lets apps switch a USB port’s power off.")
+            Text("macOS doesn’t measure each accessory’s real power use: USB figures are the most each device asked for and was allowed (current × 5 V). Stop pauses a drive without unplugging it (Reconnect also brings back a drive that was ejected), Bluetooth figures are estimates for the device type you pick. Bluetooth lists what's connected plus devices you use regularly (connected on 3 different days in 2 weeks). Other USB devices can’t be paused by apps, and no Mac lets apps switch a USB port’s power off.")
                 .font(.caption).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -459,7 +556,7 @@ struct AccessoriesButton: View {
             Text(d.isHub ? String(format: "up to %.1f W in all", d.totalWatts) : (d.milliamps > 0 ? String(format: "up to %.1f W", d.maxWatts) : "Own power"))
                 .monospacedDigit().foregroundStyle(.secondary)
                 .help("\(d.milliamps) mA allocated of \(d.availableMilliamps) mA the port offers")
-            if drive == nil, drives.contains(d.serial) {
+            if drive == nil, acc.drives.contains(d.serial) {
                 // A drive that's plugged in but ejected: re-detect it to bring it back.
                 if working.contains(d.serial) { ProgressView().controlSize(.small) }
                 else {
@@ -533,7 +630,7 @@ struct AccessoriesButton: View {
             try? await Task.sleep(for: .seconds(4))       // macOS re-detects and mounts it
             message = err ?? "“\(name)” reconnected."
             working.remove(serial)
-            await load()
+            await acc.load()
         }
     }
 
@@ -542,20 +639,15 @@ struct AccessoriesButton: View {
         let address = d.address
         Task {
             let err = await Task.detached { AccessoryControl.setBluetooth(on, address: address) }.value
-            bluetooth = await Task.detached { AccessoryControl.bluetoothDevices() }.value
+            await acc.reloadBluetooth()
             if let err { message = err }
             working.remove(address)
         }
     }
 
-    private func load() async {
-        let list = await Task.detached(priority: .utility) { Accessories.usb() }.value
-        if list != usb { usb = list }
-        let ms = await Task.detached(priority: .utility) { AccessoryControl.massStorageSerials() }.value
-        if ms != drives { drives = ms }
-        let bt = await Task.detached(priority: .utility) { AccessoryControl.bluetoothDevices() }.value
-        if bt != bluetooth { bluetooth = bt }
-        loaded = true
+    private func setType(_ t: BluetoothType, for d: AccessoryControl.BluetoothDevice) {
+        BluetoothTypes.set(t, for: d.address)
+        Task { await acc.reloadBluetooth() }
     }
 }
 
@@ -717,5 +809,69 @@ enum PowerLevel {
     }
     static func label(_ w: Double, _ l: (moderate: Double, high: Double)) -> String {
         w >= l.high ? "High" : (w >= l.moderate ? "Moderate" : "Normal")
+    }
+}
+
+/// Energy with Advanced graph on: where the power comes from and goes, over
+/// time. Lines: the whole Mac, the charger's input, and the battery charging
+/// or draining (all from the battery controller's own telemetry).
+private struct PowerDetail: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.graphTimeline) private var timeline
+    let store: HardwareStore
+    let appsWatts: Double
+
+    var body: some View {
+        let h = model.history, s = model.snapshot.system
+        let series: [GraphSeries] = [
+            .init(values: h.power, color: .green, name: "Mac uses"),
+            .init(values: h.chargerIn, color: .blue, fill: false, name: "From charger"),
+            .init(values: h.batteryCharging, color: .teal, fill: false, name: "Battery charging"),
+            .init(values: h.batteryDraining, color: .orange, fill: false, name: "Battery draining"),
+        ].filter { s in s.name == "Mac uses" || s.values.contains { $0 > 0.05 } }
+        let mac = s.systemPower ?? 0
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("POWER IN DETAIL").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                Spacer()
+                RangeCaption()
+            }
+            HStack(spacing: 16) {
+                chip("Mac uses", mac, .green)
+                if let c = s.chargerPower, c > 0.05 { chip("From charger", c, .blue) }
+                if let f = s.batteryFlow, abs(f) > 0.05 { chip(f > 0 ? "Battery charging" : "Battery draining", abs(f), f > 0 ? .teal : .orange) }
+            }
+            LineGraph(series: series, maxValue: nil)
+                .environment(\.graphUnit, .watts)
+                .frame(height: 190)
+            // Where it goes: apps' CPU work (measured per app) vs everything else.
+            if mac > 0 {
+                let apps = min(appsWatts, mac)
+                VStack(alignment: .leading, spacing: 4) {
+                    GeometryReader { g in
+                        HStack(spacing: 2) {
+                            RoundedRectangle(cornerRadius: 3).fill(Color.green).frame(width: max(2, g.size.width * apps / mac))
+                            RoundedRectangle(cornerRadius: 3).fill(Color.secondary.opacity(0.35))
+                        }
+                    }
+                    .frame(height: 10)
+                    Text(String(format: "Apps’ CPU work %.1f W · the rest (display, chip, memory, Wi-Fi, other parts) %.1f W", apps, mac - apps))
+                        .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                }
+            }
+            Text("From the battery controller’s own measurements. On power, the charger feeds the Mac and the battery; on battery, the battery feeds everything.")
+                .font(.caption).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(14)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func chip(_ label: String, _ w: Double, _ c: Color) -> some View {
+        HStack(spacing: 5) {
+            Circle().fill(c).frame(width: 8, height: 8)
+            Text(label).foregroundStyle(.secondary)
+            Text(String(format: "%.1f W", w)).monospacedDigit().fontWeight(.medium)
+        }
+        .font(.callout)
     }
 }

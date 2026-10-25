@@ -206,14 +206,39 @@ final class DetectionTests: XCTestCase {
         XCTAssertEqual(events.last?.notify, false)
     }
 
+    func testHeavyNetworkSustainedAndSpike() {
+        var e = DetectionEngine()                     // 10 MB/s for 2 min
+        var events: [DetectionEvent] = []
+        for i in 0..<25 { events += e.evaluate(DetectionSample(date: at(Double(i)), networkPerSec: 40_000_000)) }
+        for i in 25..<45 { events += e.evaluate(DetectionSample(date: at(Double(i)), networkPerSec: 0)) }
+        XCTAssertEqual(events.map(\.kind), [.spike])
+        XCTAssertEqual(events.first?.rule, .network)
+        let uploader = AppLoad(key: "/Applications/Sync.app", name: "Sync", cpu: 5, netPerSec: 30_000_000, pids: [7])
+        for i in 1000..<1130 {
+            events += e.evaluate(DetectionSample(date: at(Double(i)), apps: [uploader], networkPerSec: 30_000_000))
+        }
+        let last = events.last
+        XCTAssertEqual(last?.kind, .sustained)
+        XCTAssertEqual(last?.notify, false, "recorded in History only")
+        XCTAssertEqual(last?.subject, "Sync")
+        XCTAssertEqual(last?.pids, [7])
+    }
+
+    func testNetworkBelowThresholdIsQuiet() {
+        var e = DetectionEngine()
+        var events: [DetectionEvent] = []
+        for i in 0..<400 { events += e.evaluate(DetectionSample(date: at(Double(i)), networkPerSec: 9_000_000)) }
+        XCTAssertTrue(events.isEmpty)
+    }
+
     func testRulesCanBeTurnedOff() {
         var s = DetectionSettings()
-        s.appCPU = false; s.memory = false; s.heat = false; s.disk = false; s.diskWrites = false
+        s.appCPU = false; s.memory = false; s.heat = false; s.disk = false; s.diskWrites = false; s.network = false
         var e = DetectionEngine(settings: s)
         var events: [DetectionEvent] = []
         for i in 0..<400 {
             events += e.evaluate(DetectionSample(date: at(Double(i)), apps: [app(300)], pressure: .critical, thermal: .critical,
-                                                 diskAvailable: 1, diskCapacity: 100, diskWritePerSec: 1e9))
+                                                 diskAvailable: 1, diskCapacity: 100, diskWritePerSec: 1e9, networkPerSec: 1e9))
         }
         XCTAssertTrue(events.isEmpty)
     }
@@ -334,5 +359,7 @@ final class MemoryGrowthTests: XCTestCase {
         XCTAssertEqual(s.cpuThreshold, 150)
         XCTAssertFalse(s.heat)
         XCTAssertTrue(s.memoryGrowth, "new rule defaults on")
+        XCTAssertTrue(s.network)
+        XCTAssertEqual(s.networkThreshold, 10_000_000)
     }
 }

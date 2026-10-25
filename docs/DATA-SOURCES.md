@@ -75,7 +75,8 @@ This is how macOS itself counts memory.
 | Left out | The startup drive (that's the Disk page) and disk images (`Virtual Interface` / `Disk Image`) |
 | Volumes on a drive | `FileManager.mountedVolumeURLs` (hidden volumes skipped) → `DADiskCreateFromVolumePath` → BSD name → walk IOKit parents to the drive's `IOBlockStorageDriver` (works through APFS containers). Size and free space from `URLResourceValues` |
 | Drive read/write, operations | That driver's `Statistics` counters (reset when the drive is plugged in, hence "since plugged in") |
-| Which network adapters count | `IONetworkInterface` whose IOKit ancestors include an `IOUSBHostDevice` (USB) or an `IOPCITunnelled` PCI device (Thunderbolt). Built-in Wi-Fi, Thunderbolt Bridge ports and virtual interfaces (`anpi`, the always-present "Ethernet Adapter" en3/en4) are left out |
+| Which network connections get a tab | The Wi-Fi card; built-in Ethernet ports (`IONetworkInterface` with `IOBuiltin` = Yes, SC type Ethernet, not a "Thunderbolt N" bridge port); and plugged-in adapters (IOKit ancestors include an `IOUSBHostDevice` (USB) or an `IOPCITunnelled` PCI device (Thunderbolt)). Virtual interfaces (`anpi`, the always-present "Ethernet Adapter" en3/en4, which have `IOBuiltin` = No) are left out. Wired ports are named Ethernet, Ethernet 2… (built-in first) |
+| VPN tabs | `utun*` / `ipsec*` / `ppp*` interfaces that are up and have an IPv4 address in `SCDynamicStore` (macOS's idle system tunnels only have IPv6 link-local addresses). Name from the matching `State:/Network/Service/<id>/IPv4` → `Setup:/Network/Service/<id>` `UserDefinedName`, cached per tunnel; VPN apps that manage their own tunnel may not report one |
 | Adapter name, type, MAC | `SCNetworkInterfaceCopyAll` (localized display name, interface type, hardware address) |
 | Adapter traffic, link speed, up/down | The same `NET_RT_IFLIST2` sysctl as the whole-Mac numbers, per interface: `ifi_ibytes`/`ifi_obytes`, `ifi_baudrate`, `IFF_UP`+`IFF_RUNNING` |
 | Adapter IP | `SCDynamicStore` `State:/Network/Interface/<bsd>/IPv4` |
@@ -193,3 +194,223 @@ This is how macOS itself counts memory.
 CPU, disk writes and memory (your own processes, grouped by app), pressure
 level, memory %, swap used, physical memory, thermal state, disk free and
 capacity, whole-disk write speed. See `docs/PROJECT.md` for the rules.
+
+## Bluetooth accessories (Energy › Accessories)
+
+| Value | Source |
+|---|---|
+| Which devices | `IOBluetoothDevice.pairedDevices()`: devices connected now, plus devices used regularly (connected on 3 different days in the last 14; `bluetoothSeenDays` in UserDefaults) unless removed (`bluetoothHidden`; a removed device returns after it disconnects and connects again) |
+| Type | The user's choice (Settings › Bluetooth accessories, or the popover; `UserDefaults` `bluetoothTypes`, by address), else a guess from the class of device (major / minor) and the name (`BluetoothType.guess`) |
+| Power | **Estimate, not measured** (macOS has no per-accessory power reading): a typical range for the type while in use. Earbuds 20–60 mW, headphones 50–300 mW, speaker 1–5 W, keyboard 10–50 mW, mouse / trackpad 10–30 mW, game controller 100–500 mW, watch 10–50 mW; phones and other devices: "varies" |
+
+## Displays (Performance › Display)
+
+| Value | Source |
+|---|---|
+| Displays | `CGGetActiveDisplayList`; name, HDR (`maximumPotentialExtendedDynamicRangeColorComponentValue` > 1) and color profile from the matching `NSScreen`; re-read on `didChangeScreenParametersNotification` |
+| Looks like / pixels / refresh | `CGDisplayCopyDisplayMode`: `width`×`height` (points), `pixelWidth`×`pixelHeight`, `refreshRate` |
+| Size | `CGDisplayScreenSize` (mm, reported by the display) → diagonal inches |
+| Resolutions | `CGDisplayCopyAllDisplayModes` with duplicate low-resolution modes, usable for the desktop, de-duplicated; set with `CGConfigureDisplayWithDisplayMode` (`.permanently`) |
+| Brightness: Apple displays | Private `DisplayServices` framework (`DisplayServicesCanChangeBrightness` / `Get` / `SetBrightness`), loaded at runtime |
+| Brightness: other monitors | DDC/CI VCP code 0x10 over the display link (Apple silicon `IOAVService` read / write I2C, address 0x37, sub-address 0x51, 40 ms before reading a reply). The display's `DCPAVServiceProxy` (Location External) is matched to the screen by vendor / product from `DisplayAttributes`; with one external display, that one. Not tested yet (no external monitor) |
+| Brightness: fallback | Software dimming: `CGSetDisplayTransferByFormula` (15 % floor); macOS resets it when Apex quits |
+
+## Public IP (Network page)
+
+| Value | Source |
+|---|---|
+| Public IP | HTTPS GET `https://api.ipify.org` (plain text, nothing sent but the request), only while the Network page shows the connection in use; again when that connection changes, else every 10 minutes. Validated with `inet_pton`. Blurred by default; `blurPublicIP` in UserDefaults keeps the eye button's choice |
+| Per-connection traffic | The Traffic list filtered to connections whose `nettop` interface is that tab's interface |
+
+## Menu bar panel
+
+| Value | Source |
+|---|---|
+| Graphs | The same 10-minute `History` as the Performance pages; memory is the pressure graph (green / yellow / red by level) |
+| Temperatures | `HardwareStore` (HID sensors): CPU, GPU and Storage group averages; read every 5 s only while the panel is open |
+| Power mode | `ProcessInfo.isLowPowerModeEnabled` (Low Power / Automatic) |
+| Keep awake | `IOPMAssertionCreateWithName` `PreventUserIdleSystemSleep` (+ `PreventUserIdleDisplaySleep` with "Keep display on"); released when the time is up, switched off, or Apex quits |
+| Latest screenshot | Newest of 40 recent files in the screenshot folder (`com.apple.screencapture` `location`, else Desktop) whose Spotlight `kMDItemIsScreenCapture` is true |
+| Clipboard | `NSPasteboard.general.changeCount` every 0.5 s; skips items with `org.nspasteboard.ConcealedType` / `TransientType` / `AutoGeneratedType` (password managers, one-time codes); 50 items, images up to 8 MB, text up to 20 000 characters; in memory only |
+
+## Energy page additions
+
+| Value | Source |
+|---|---|
+| Power mode | `pmset -g`: `powermode` 0 / 1 / 2 (Automatic / Low Power / High Power) or `lowpowermode 1`; else `ProcessInfo.isLowPowerModeEnabled`. Read in the background at most every 10 s; pages show the last reading (never waits on `pmset`) |
+| Accessories | Wired: USB devices that aren't hubs; Bluetooth: connected devices. Watts: USB allowances (current × 5 V) plus the upper end of each Bluetooth type's typical range: "up to", never a measurement |
+
+## Floating shelf
+
+| Value | Source |
+|---|---|
+| A file drag started | Global `NSEvent` monitors for left mouse down / dragged / up (mouse events need no permission); a drag counts when the system drag pasteboard (`NSPasteboard(name: .drag)`) changed since the mouse went down and holds a file URL or image |
+| Wiggle (new shelf) | During a file drag, the pointer turning back 3 times (strokes of 24 pt or more, within 0.9 s) on either axis, from the mouse-dragged events (`ShakeDetector`); starts a new shelf, the old one moves to Recent shelves |
+| Hide | 0.6 s after the drag ends, unless the shelf gained an item |
+| Already showing | A plain drag leaves a shelf that is already up (or tucked at the edge) where it is |
+| Motion | Appears by fading in while rising 12 pt (0.22 s); a wiggle while it's up glides it to the pointer (0.24 s); closes with a 0.16 s fade; tucking away 0.28 s. A fade-out or delayed hide that started earlier never hides a shelf shown again since (generation count). Items added / removed animate in and out |
+
+## Internet connection speed
+
+| Value | Source |
+|---|---|
+| Download / upload | `/usr/bin/networkQuality -c -I <interface> -M 25` (macOS's own test, Apple's servers), only when the user clicks Test: `dl_throughput` / `ul_throughput` in bits per second; `responsiveness` (round trips per minute under load) in the tooltip. The last result per interface is kept (`speedResults`). Moves real data (tens to hundreds of MB on fast links) |
+
+## AirPlay displays
+
+| Value | Source |
+|---|---|
+| Devices | Bonjour `_airplay._tcp` with `NWBrowser` while the AirPlay popover is open (Info.plist `NSBonjourServices`); this Mac's own receiver left out |
+| Video or audio only | TXT `features` bits 0 (video) or 7 (screen mirroring); TXT `model` for the icon |
+| Starting mirroring | Not possible for third-party apps (Apple's AirPlay sender needs Apple-only entitlements): Apex opens Displays settings, where macOS offers AirPlay |
+
+## Removing an app (Disk › Analyze)
+
+| Value | Source |
+|---|---|
+| App | `Bundle(path:)`: bundle identifier and name; Apple apps (`com.apple.*`, `/System`) are refused |
+| What it left | `~/Library/` Application Support, Caches, Preferences (+ ByHost), Containers, Group Containers, Saved Application State, HTTPStorages, WebKit, Logs, LaunchAgents, Cookies, Application Scripts: items named the bundle id (or id + .plist / .savedState / .binarycookies), starting with the id + "." (extensions, helpers), or ending with "." + id (group containers); prefix rules only for ids with 3+ parts; folders named exactly like the app (3+ letters). Sizes with `FastSize` |
+| Removing | `FileManager.trashItem` for the app and each ticked item: everything can be put back from the Trash |
+
+## Stay Awake (Energy)
+
+| Value | Source |
+|---|---|
+| Keep awake / chosen days | `KeepAwake` power assertions (lid open); days in `awakeDays` (weekday numbers), checked every 30 s |
+| Lid-closed mode | Apex: on when enabled, a chosen app (bundle id) is running and the Mac is on power (`IOPSGetProvidingPowerSourceType`), or on battery if allowed and for at most `lidAwakeBatteryMinutes` (≤ 60) since unplugging. Apex writes `stayAwakeUntil` = now + 3 min to the helper's settings every 30 s. Helper (root): `pmset -a disablesleep 1` while `stayAwakeUntil` is in the future and at most 10 min ahead, else `0`; marker file `/Library/Application Support/Apex/sleep-disabled-by-apex` so a killed helper undoes it on start, and a pmset setting the user made is never touched |
+
+## Shelf: details and compare
+
+| Value | Source |
+|---|---|
+| Photo details | ImageIO properties: pixel size, colour model / depth, profile, dpi; TIFF make / model / software; Exif lens, f-number, exposure, ISO, focal length, date taken, comment; GPS latitude / longitude |
+| Video details | AVFoundation: duration, first video track's natural size, frame rate, estimated data rate, codec (format description); common metadata make / model / creation date / location / software |
+| PDF details | PDFKit page count, author, creator |
+| Remove Details | Photos: `CGImageDestinationCopyImageSource` with an empty metadata set (orientation kept), XMP and GPS excluded: the image data is copied, not re-encoded. Videos: `AVAssetExportPresetPassthrough`, `metadata = []`, `.forSharing()` filter |
+| Removed | Personal-detail fields (camera, lens, settings, taken, location, software, comment) in the original and not in the copy |
+
+## Shelf: side and categories
+
+| Value | Source |
+|---|---|
+| Side shelves | `ShelfStore.side` (newest first, up to 10), saved in `Shelf/side.json` |
+| Categories | `ShelfStore.categories` (named), saved in `Shelf/categories.json`; adding merges by file path (no file twice); a new category with an existing name (any case) adds to that one |
+| What's open | `ShelfStore.open`: the current shelf, a side shelf or a category; the floating shelf and the menu bar Shelf tab show it |
+| Edge handle | A 22 × 96 pt panel at the right edge of the main screen, shown while anything is to the side or a category has items |
+| Previews | `QLThumbnailGenerator` thumbnails of the first four items |
+
+## Shelf: compress and convert
+
+| Value | Source |
+|---|---|
+| Images | ImageIO re-encode. JPEG stays JPEG, everything else becomes HEIC (keeps transparency). Quality 0.8 → 0.7 → 0.6 until at least 50 % smaller; last resort 85 % of the resolution, never for files under 512 KB. Never kept if not smaller. Details (EXIF, GPS…) copied with `CGImageDestinationAddImageFromSource`, or dropped (orientation only) |
+| Videos | `AVAssetExportSession` HEVC Highest Quality; if not 50 % smaller and wider than 1920 px, HEVC 1920×1080. Details kept (`metadata`) or dropped (`metadata = []`, `metadataItemFilter = .forSharing()`) |
+| PDFs | PDFKit `write(to:withOptions:)` with `saveImagesAsJPEGOption` + `optimizeImagesForScreenOption`: pictures re-saved as JPEG at screen resolution, text and drawings untouched. Kept only if smaller; otherwise the original stays and the note says it's text or already compressed |
+| Anything else | `ditto -c -k --sequesterRsrc --keepParent` (the same ZIP as Finder's Compress), files, folders and apps |
+| Finder aliases | Followed to the original (`URL(resolvingAliasFileAt:)`) when added and when old shelves load, so the shelf shows and compresses the real file |
+| Output | "Name (compressed).heic" / "(converted)" next to the original (or in Downloads if that folder can't be written), never overwriting; the original is never changed |
+| Thumbnails | `QLThumbnailGenerator` (the file's Quick Look preview) |
+
+## Record
+
+| Value | Source |
+|---|---|
+| Everything | The same `Snapshot` every page uses, written as it arrives (`Recorder.record`, called from `AppModel.apply`). While recording, sampling covers every process with network and GPU, window open or closed, every 2 s (or the chosen slower rate) |
+| Processes per line | Those doing something (CPU ≥ 0.5 %, disk, network or GPU) + the 15 largest by memory; every 60 s all processes |
+| Events | Apex alerts (`EventLog`) as they happen |
+| Summary | Average / peak CPU (and when), peak memory and swap, worst pressure and heat, top 10 by average CPU and by peak memory |
+| File | `~/Documents/Apex Recordings/<Everything | CPU | Memory | Disk | Network | GPU | Energy>/…jsonl`, one file per recording (several can run at once), written on a background queue; closed (with the summary) on Stop or when Apex quits |
+| Scoped (page) recordings | Only the resource's part of `system` and, per process, its figures: CPU (cpu, threads; processes ≥ 0.5 %), Memory (memory; 30 biggest), Disk (read / write; processes using the disk), Network (net; processes using it), GPU (gpu), Energy (power, battery, thermal; top 30 by power). All processes once a minute |
+
+## Network: an app's last 10 minutes
+
+| Value | Source |
+|---|---|
+| Speed graph | The traffic list's `nettop` snapshot every 5 s, summed per app (connections' rates), `TrafficHistory.points` |
+| Servers | Every non-local connection seen, by its key: bytes received / sent since Apex first saw it (deltas), first / last seen, still open or closed; grouped per server (protocol, address, port) |
+| When | Only while an Apex window is on screen (`AppModel.isWindowVisible`); older than 10 minutes dropped on every snapshot; memory only |
+
+## Cloud Disks: file rings and syncing
+
+| Value | Source |
+|---|---|
+| Ring per file | Every 5 s while the list shows: `CloudUpload.states` of the listed files (uploaded / sending / queued / error) and `CloudUpload.dot`: sending = green (even if Apex's server check failed), queued = green, or yellow when paused or the server didn't answer (checked every 30 s, or from a running check); errors: File Provider -1004 / -2005 = connection (yellow while the server is down, else red), -1003 full, -1000 signed out, -1001 name clash, -2010 excluded = red |
+| Progress | Estimate: the service's app's bytes sent (one `nettop` of its processes per refresh) shared between the files it's sending, ÷ file size, capped at 97 % until the file's own "uploaded" flag; kept while paused. macOS doesn't give other apps per-file upload progress for File Provider services |
+| "Syncing" | A listed file is being sent, or the app sent > 10 KB since the last refresh |
+
+## Cloud Disks: online storage by hand
+
+| Value | Source |
+|---|---|
+| Check on Website | The catalogue's storage page, or for Nextcloud `<server>/index.php/settings/user`, ownCloud `<server>/index.php/settings/personal` (server from `CloudUpload.knownServer`; http for private IPv4, else https), opened in `WebStorageSheet`; `CloudCatalog.parseUsage` reads "X of Y used" |
+| Enter Storage | Typed used + plan size (MB / GB / TB, decimal comma or point), saved with the web-read figures in `cloudWebQuota` with `manual = 1`; loaded on every refresh |
+
+## Cloud Disks: upload monitor
+
+| Value | Source |
+|---|---|
+| Files left / sending now | Every 3 s, fresh `resourceValues` of each waiting file: `ubiquitousItemIsUploaded`, `ubiquitousItemIsUploading`, `ubiquitousItemUploadingError`. Uploaded files are offloaded straight away (Offload) or counted (Check Uploads) |
+| Speed, server | The service's app: processes whose program is inside "<Name>.app" (app + File Provider extension; iCloud: iCloudDriveCore / CloudKit / the iCloud Drive extension), found with `proc_listallpids` + `proc_pidpath` every 30 s. One `nettop -L 1 -x -n -p <pids>` (~10 ms) every 3 s: bytes sent since the last reading = speed; the remote address sent the most = the server |
+| Server when nothing's open | WebDAV address; well-known API host for iCloud / OneDrive / Google Drive / Dropbox / Box; the host in a "Nextcloud-host-user" folder name |
+| Reachable | TCP connect (`NWConnection`, 3 s limit) every 10 s; ms to connect |
+| Why not | Private IPv4 server (10/8, 172.16/12, 192.168/16) not on any of this Mac's networks (`getifaddrs` address + netmask): "on a different network; connect to it or its VPN" |
+| Time left | Size left ÷ current speed (only when ≥ 1 KB/s) |
+| Gives up | 15 minutes without a file finishing or the app sending (≥ 2 KB/s) while the server answers; while it can't be reached it waits however long it takes |
+| Pause | Pause stops offloading and reading traffic; every 3 s the waiting files are checked and every 10 s the server: it carries on by itself when files upload again (the service's app syncing) or the server answers after being unreachable. Resume / Stop by hand |
+| Notifications | Lost connection after 60 s (once), connection back, and the result with the total time |
+
+## Network Doctor
+
+| Check | Source |
+|---|---|
+| Wi-Fi signal, noise, link speed, band | CoreWLAN `CWInterface` `rssiValue`, `noiseMeasurement`, `transmitRate`, `wlanChannel.channelBand` (no location permission needed) |
+| Address | the connection's IPv4 (`SCDynamicStore`); 169.254.x.x = made up by the Mac (no DHCP answer) |
+| Router | `State:/Network/Global/IPv4` `Router` (connection in use only); `/sbin/ping -q -c 8 -i 0.25 -t 5 -b <interface>` |
+| Internet | ping 1.1.1.1 through the connection, and HTTPS GET `https://www.apple.com/library/test/success.html` (some networks block ping) |
+| Website names | `getaddrinfo("www.apple.com")`, timed, 4 s limit |
+| Sign-in page | `http://captive.apple.com/hotspot-detect.html` must contain "Success" (Apple's own captive-portal test) |
+| Rules | `NetworkDoctor.diagnose` (pure, tested): first failing step is blamed; router loss ≥ 20 % warning, Wi-Fi router reply > 30 ms congested; internet reply > 150 ms slow; DNS > 300 ms slow; signal < −75 dBm weak, < −67 fair; signal − noise < 20 dB interference; last speed test < 5 Mb/s slow |
+
+## Power in detail (Energy, Advanced graph)
+
+| Value | Source |
+|---|---|
+| Mac uses | `PowerTelemetryData.SystemLoad` (mW) |
+| From charger | `PowerTelemetryData.SystemPowerIn` (mW) |
+| Battery charging / draining | `PowerTelemetryData.BatteryPower` (mW, signed, stored as unsigned 64-bit): + charging, − draining, drawn as two lines |
+| Apps vs the rest | Sum of the Energy table's per-app power (CPU work) against Mac uses; the rest is display, chip, memory, Wi-Fi and other parts |
+| Update rate | The battery controller refreshes these every few seconds, so lines move in steps |
+
+## Cloud (Performance › Cloud)
+
+| Value | Source |
+|---|---|
+| Services | iCloud Drive (`~/Library/Mobile Documents/com~apple~CloudDocs`); each folder in `~/Library/CloudStorage` (macOS File Provider: OneDrive, Google Drive, Dropbox, Box, Nextcloud…; name from the folder prefix); added folders and WebDAV servers (`cloudServices` in UserDefaults, passwords in the login keychain) |
+| On this Mac / online only | Walk of the folder with `fileSize` (logical) and `totalFileAllocatedSize` (stored here) per file; a file with size > 0 and nothing stored is online-only. Reading metadata never downloads. Rescanned when the page opens if older than 10 min, or with ↻ |
+| Online storage | WebDAV `PROPFIND` Depth 0 for `quota-used-bytes` / `quota-available-bytes` (RFC 4331). macOS doesn't give apps the quota of File Provider services (their folder reports the Mac's disk), so for those the page says so |
+| Make Online-Only | `FileManager.evictUbiquitousItem` on the chosen files (the largest stored here, over 1 MB) |
+| Offload All | Every file with storage on this Mac (`storedFiles`), `evictUbiquitousItem` in chunks of 50; on failure `ubiquitousItemIsUploaded` = false → retried every 60 s (10 rounds), `ubiquitousItemUploadingError` → reported; a notification (`Alerts.notify`) at the end |
+
+## Assistant (Local AI)
+
+| Value | Source |
+|---|---|
+| Server | First of LM Studio (`http://127.0.0.1:1234/v1`) and Ollama (`http://127.0.0.1:11434/v1`) whose `/models` answers within 1.5 s |
+| Models | `/v1/models` ids, embedding models left out; the choice is kept (`assistantModel`) |
+| Answers | `/v1/chat/completions` with `stream: true` (server-sent events), temperature 0.3, last 12 messages |
+| Context | Each question carries Apex's live readings as plain text (`AssistantContext.build`): Mac, CPU, memory and pressure, swap, startup disk, network, GPU, battery, five busiest and largest apps, five latest alerts. Nothing leaves the Mac |
+| Scope | System instructions: this Mac and its system utilities only; plain words; steps in order; Apex pages to use; no risky commands without warning |
+| Start LM Studio's Server | `~/.lmstudio/bin/lms server start`, only when the user presses the button |
+| Catalogue | `CloudCatalog.providers`: Google (Drive, Gmail, Photos), OneDrive, iCloud, Dropbox, Box, MEGA, pCloud, Proton Drive, Sync.com, Tresorit, IDrive, Icedrive, Koofr, Yandex Disk, Jottacloud, Filen, TeraBox, Nextcloud, ownCloud, Seafile, Synology; each with its storage page, WebDAV address and Mac app folder where they exist; "Other provider" by address |
+| Total storage (web sign-in) | The provider's storage page in a WKWebView with its own persistent `WKWebsiteDataStore(forIdentifier:)` per service; page text (`document.body.innerText`) every 2 s, `CloudCatalog.parseUsage` finds "X unit (used) of Y unit" (of, /, out of, von, de…; decimal commas; largest total wins). Saved with the time (`cloudWebQuota`), re-read in a hidden web view every 6 h or on ↻. If the provider redesigns its page, the line may not be found: Apex says to sign in again |
+| Added folders | Total and free space of the disk they're on (`volumeTotalCapacity`, `volumeAvailableCapacityForImportantUsage`) |
+
+## Permissions (welcome flow, Settings)
+
+| Permission | How Apex knows / asks |
+|---|---|
+| Notifications | `UNUserNotificationCenter` settings; asked directly |
+| Full Disk Access | Can't be asked by apps: opening a protected file (`TCC.db`, Safari bookmarks) or listing `~/Library/Mail` succeeds only with it on; the button opens System Settings › Privacy › Full Disk Access |
+| Bluetooth | `CBManager.authorization`; first Bluetooth use makes macOS ask, else the Privacy › Bluetooth switch is opened |
+| Open at Login | `SMAppService.mainApp` status / `register()` (Login Items approval opened if needed) |
+| Battery and Fan Helper | `FanController.installed`; Install asks for the admin password |

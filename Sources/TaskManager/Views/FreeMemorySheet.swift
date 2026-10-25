@@ -34,12 +34,18 @@ struct FreeMemorySheet: View {
     }
 
 
+    /// Remembered as optimized (see `AppModel.optimizedApps`), or the app itself is in background mode.
+    private func isOptimized(_ a: AppUsage) -> Bool {
+        model.optimizedApps.contains(a.bundlePath) || model.optimized.contains(a.id)
+    }
+
     var body: some View {
         let mem = model.snapshot.system.memory
         let list = apps
         let chosen = list.filter { selected.contains($0.id) }
         let allPIDs = list.flatMap(\.pids)
-        let allOptimized = !allPIDs.isEmpty && allPIDs.allSatisfy(model.optimized.contains)
+        let optimizedCount = list.filter(isOptimized).count
+        let allOptimized = !list.isEmpty && optimizedCount == list.count
         VStack(alignment: .leading, spacing: 16) {
             HStack {
                 Text("Free Up Memory").font(.title2).bold()
@@ -58,6 +64,9 @@ struct FreeMemorySheet: View {
                 Text("Your apps").font(.headline)
                 Text("tick the ones to act on").font(.caption).foregroundStyle(.secondary)
                 Spacer()
+                if optimizedCount > 0 {
+                    Label("\(optimizedCount) optimized", systemImage: "leaf.fill").font(.caption).foregroundStyle(.green)
+                }
                 Button(selected.count == list.count ? "Deselect All" : "Select All") {
                     selected = selected.count == list.count ? [] : Set(list.map(\.id))
                 }
@@ -71,7 +80,7 @@ struct FreeMemorySheet: View {
                             HStack(spacing: 8) {
                                 Image(nsImage: IconCache.shared.icon(forBundle: a.bundlePath)).resizable().frame(width: 18, height: 18)
                                 Text(a.name)
-                                if a.pids.allSatisfy(model.optimized.contains) {
+                                if isOptimized(a) {
                                     Label("Optimized", systemImage: "leaf.fill").labelStyle(.iconOnly)
                                         .font(.caption).foregroundStyle(.green).help("Optimized")
                                 }
@@ -91,7 +100,7 @@ struct FreeMemorySheet: View {
             .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.separator, lineWidth: 0.5))
 
             let chosenPIDs = chosen.flatMap(\.pids)
-            let chosenOptimized = !chosenPIDs.isEmpty && chosenPIDs.allSatisfy(model.optimized.contains)
+            let chosenOptimized = !chosen.isEmpty && chosen.allSatisfy(isOptimized)
             let chosenMemory = Fmt.bytes(chosen.reduce(0) { $0 + $1.memory })
 
             option(icon: "leaf.fill", tint: .green, title: "Optimize",
@@ -110,11 +119,23 @@ struct FreeMemorySheet: View {
                         .buttonStyle(.borderedProminent).tint(.green)
                         .disabled(chosen.isEmpty)
                     }
-                    Button(allOptimized ? "Restore All" : "Optimize All") {
-                        model.setOptimized(pids: allPIDs, !allOptimized)
-                        result = allOptimized ? "All apps restored to normal." : "\(list.count) apps optimized."
+                    HStack(spacing: 10) {
+                        if !allOptimized {
+                            Button("Optimize All") {
+                                model.setOptimized(pids: allPIDs, true)
+                                result = "\(list.count) apps optimized."
+                            }
+                            .buttonStyle(.link).font(.caption)
+                        }
+                        // Always here: no need to find and tick the optimized apps again.
+                        Button(optimizedCount > 0 ? "Restore All (\(optimizedCount))" : "Restore All") {
+                            model.restoreAllOptimized()
+                            result = "All apps restored to normal."
+                        }
+                        .font(.caption)
+                        .disabled(optimizedCount == 0 && model.optimized.isEmpty)
+                        .help("Every optimized app back to normal, on screen with its windows where they were.")
                     }
-                    .buttonStyle(.link).font(.caption)
                 }
             }
 

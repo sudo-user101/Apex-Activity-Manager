@@ -60,10 +60,14 @@ public enum FanControl {
         public var chargeSchedules: [ChargeSchedule]?
         /// Night charging: hold low overnight, full by morning (nil = off).
         public var nightCharging: NightCharging?
+        /// Lid-closed mode: keep the Mac awake (even with the lid closed) until
+        /// this time. Apex renews it every minute while it's wanted, so it
+        /// lapses by itself if Apex stops (see `sleepDisabled`).
+        public var stayAwakeUntil: Date?
         public init(heartbeat: Date = Date(), fans: [FanSetting] = [], chargeLimit: Int? = nil, chargeOverrideUntil: Date? = nil,
-                    chargeSchedules: [ChargeSchedule]? = nil, nightCharging: NightCharging? = nil) {
+                    chargeSchedules: [ChargeSchedule]? = nil, nightCharging: NightCharging? = nil, stayAwakeUntil: Date? = nil) {
             self.heartbeat = heartbeat; self.fans = fans; self.chargeLimit = chargeLimit; self.chargeOverrideUntil = chargeOverrideUntil
-            self.chargeSchedules = chargeSchedules; self.nightCharging = nightCharging
+            self.chargeSchedules = chargeSchedules; self.nightCharging = nightCharging; self.stayAwakeUntil = stayAwakeUntil
         }
         public var allAutomatic: Bool { fans.allSatisfy { $0.mode == .auto } }
     }
@@ -281,6 +285,16 @@ public enum FanControl {
     }
 
     public static func clamp(_ v: Double, _ lo: Double, _ hi: Double) -> Double { min(max(v, lo), hi) }
+
+    /// Longest the helper honours one renewal: a stale file can't keep a Mac awake.
+    public static let stayAwakeMax: TimeInterval = 10 * 60
+
+    /// Whether the helper should keep system sleep disabled right now.
+    public static func sleepDisabled(until: Date?, now: Date = Date()) -> Bool {
+        guard let until else { return false }
+        let left = until.timeIntervalSince(now)
+        return left > 0 && left <= stayAwakeMax
+    }
 
     public static func decode(_ data: Data) -> Config? {
         let d = JSONDecoder(); d.dateDecodingStrategy = .secondsSince1970

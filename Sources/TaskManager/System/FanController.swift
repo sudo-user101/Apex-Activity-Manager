@@ -19,6 +19,8 @@ final class FanController {
     private(set) var chargeOverrideUntil: Date?
     private(set) var chargeSchedules: [FanControl.ChargeSchedule] = []
     private(set) var nightCharging: FanControl.NightCharging?
+    /// Lid-closed mode, renewed by `LidAwake` (nil = off).
+    private(set) var stayAwakeUntil: Date?
     /// What the helper actually did (read back from its status file).
     private(set) var status: FanControl.Status?
 
@@ -118,7 +120,8 @@ final class FanController {
     func save() {
         guard installed else { return }
         let cfg = FanControl.Config(heartbeat: Date(), fans: settings, chargeLimit: chargeLimit, chargeOverrideUntil: chargeOverrideUntil,
-                                    chargeSchedules: chargeSchedules.isEmpty ? nil : chargeSchedules, nightCharging: nightCharging)
+                                    chargeSchedules: chargeSchedules.isEmpty ? nil : chargeSchedules, nightCharging: nightCharging,
+                                    stayAwakeUntil: stayAwakeUntil)
         write(cfg)
         heartbeat?.invalidate()
         heartbeat = nil
@@ -132,10 +135,21 @@ final class FanController {
     /// On quit: hand the fans straight back to macOS.
     func restoreAutomatic() {
         guard installed else { return }
-        // Fans back to macOS; the charge limit deliberately stays on.
+        // Fans back to macOS; the charge limit, schedules and night charging
+        // deliberately stay on (the helper runs them while Apex is closed).
+        // Lid-closed mode ends: Apex isn't there to watch the apps.
+        stayAwakeUntil = nil
         let cfg = FanControl.Config(heartbeat: Date(), fans: settings.map { var s = $0; s.mode = .auto; return s },
-                                    chargeLimit: chargeLimit, chargeOverrideUntil: chargeOverrideUntil)
+                                    chargeLimit: chargeLimit, chargeOverrideUntil: chargeOverrideUntil,
+                                    chargeSchedules: chargeSchedules.isEmpty ? nil : chargeSchedules, nightCharging: nightCharging)
         write(cfg)
+    }
+
+    /// Lid-closed mode: keep the Mac awake until this time (nil = off).
+    func setStayAwake(until: Date?) {
+        guard until != stayAwakeUntil else { return }
+        stayAwakeUntil = until
+        save()
     }
 
     /// The settings folder belongs to root, so the file (owned by you) is

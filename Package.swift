@@ -26,6 +26,7 @@ let package = Package(
                 .linkedFramework("DiskArbitration"),
                 .linkedFramework("IOBluetooth"),
                 .linkedFramework("IOUSBHost"),
+                .linkedFramework("CoreWLAN"),
             ]
         ),
         .testTarget(

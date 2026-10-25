@@ -37,11 +37,20 @@ struct ContentView: View {
                     .fixedSize()
                     .help("Switch view (⌘1–⌘6)")
                 }
+                ToolbarItem(placement: .primaryAction) { RecordButton() }
             }
         }
         .onAppear {
             let open = openWindow
             model.openMainWindow = { open(id: "main"); NSApp.activate(ignoringOtherApps: true) }
+        }
+        .sheet(isPresented: $model.showWelcome) { OnboardingView() }
+        .task {
+            // First launch (or APEX_OPEN=welcome): the welcome flow.
+            if !UserDefaults.standard.bool(forKey: "onboarded") || ProcessInfo.processInfo.environment["APEX_OPEN"] == "welcome" {
+                try? await Task.sleep(for: .milliseconds(600))
+                model.showWelcome = true
+            }
         }
         .sheet(isPresented: $model.showRunTask) {
             RunTaskSheet()

@@ -76,7 +76,7 @@ final class LocalAddressTests: XCTestCase {
         XCTAssertEqual(LocalAddress.scope(of: "192.168.1.4"), .privateLAN)
         XCTAssertEqual(LocalAddress.scope(of: "172.20.0.1"), .privateLAN)
         XCTAssertEqual(LocalAddress.scope(of: "172.32.0.1"), .publicIP)
-        XCTAssertEqual(LocalAddress.scope(of: "10.0.0.115"), .privateLAN)
+        XCTAssertEqual(LocalAddress.scope(of: "10.0.0.20"), .privateLAN)
         XCTAssertEqual(LocalAddress.scope(of: "169.254.3.3"), .linkLocal)
         XCTAssertEqual(LocalAddress.scope(of: "100.100.1.1"), .carrierNAT)
         XCTAssertEqual(LocalAddress.scope(of: "8.8.8.8"), .publicIP)

@@ -38,6 +38,13 @@ control, in one light app that stops working when you're not looking at it.
   second, and sampling pauses completely when the window is hidden.
 - **Fast clean-up.** Storage scans measure folders in parallel across every
   CPU core, so Clean and Analyze fill in quickly even on large libraries.
+- **Cloud Disks.** What's on this Mac and what's only in the cloud, for
+  iCloud Drive, OneDrive, Google Drive, Dropbox, Nextcloud and more, with
+  uploads you can watch, pause and resume.
+- **A shelf for your files.** Drag a file and a shelf appears; keep files
+  there, compress them, or tuck them into a category for later.
+- **Record for later.** Save everything Apex measures to a file you can hand
+  to an AI to find out what was slowing the Mac down.
 - **Honest numbers.** When macOS doesn't expose something, Apex says so
   instead of guessing.
 
@@ -192,11 +199,17 @@ verification afterwards.
 
 - **Users** and **Services** (start, stop, restart), **Local AI** runtimes
   (Ollama, LM Studio, llama.cpp and more) with their models and memory, and
-  a **menu bar** monitor.
+  an **Assistant** that answers questions about your Mac with a model running
+  on it.
+- **Menu bar** with Monitor, Energy, Shelf, Clipboard and Sessions tabs.
+- **Display** brightness for any monitor, resolutions and AirPlay devices.
+- **Network Doctor**, an internet speed test, your public IP, and each
+  app's last 10 minutes of traffic.
+- **Remove apps** with or without everything they left behind.
 
 ## Install
 
-1. Download **Apex Activity Manager 1.1.0.dmg** from
+1. Download **Apex Activity Manager 1.2.0.dmg** from
    [Releases](https://github.com/sudo-user101/Apex-Activity-Manager/releases/latest).
 2. Open it and drag **Apex Activity Manager** onto **Applications**.
 3. The first time, macOS may say it can't check the app (it isn't notarized
@@ -252,7 +265,9 @@ More: [Architecture](docs/ARCHITECTURE.md) · [Where every number comes from](do
 
 ## Roadmap
 
-- A native **Windows** edition.
+See the [open issues](https://github.com/sudo-user101/Apex-Activity-Manager/issues) for what's being worked on next.
+
+- A native **Windows** edition, and a **Linux** edition.
 - AI-assisted explanations: your own API key, a local model, or an Apex
   subscription ([design](docs/AI-DIAGNOSTICS.md)).
 - A Developer ID-signed, notarized release.

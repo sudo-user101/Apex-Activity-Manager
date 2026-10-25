@@ -170,6 +170,7 @@ struct AnalyzeView: View {
     @State private var sizes: [String: (UInt64, Bool)] = [:] // cache across navigation
     @State private var generation = 0
     @State private var toTrash: DiskEntry?
+    @State private var removeApp: DiskEntry?
     @State private var message: String?
 
     private var protectedRoots: Set<String> {
@@ -220,6 +221,14 @@ struct AnalyzeView: View {
             }
         }
         .onAppear { if let s = startAt, stack.isEmpty { stack = [s] }; load() }
+        .sheet(item: $removeApp) { e in
+            AppRemovalSheet(path: e.path) { msg in
+                message = msg
+                sizes[e.path] = nil
+                for s in stack { sizes[s.path] = nil }
+                load()
+            }
+        }
         .confirmationDialog("Move “\(toTrash?.name ?? "")” to the Trash?", isPresented: Binding(get: { toTrash != nil }, set: { if !$0 { toTrash = nil } })) {
             Button("Move to Trash", role: .destructive) { trash() }
         } message: {
@@ -248,8 +257,8 @@ struct AnalyzeView: View {
             Text(String(format: "%.1f%%", fraction * 100)).font(.caption).monospacedDigit().foregroundStyle(.secondary).frame(width: 48, alignment: .trailing)
             Button { ProcessActions.reveal(path: e.path) } label: { Image(systemName: "magnifyingglass") }
                 .buttonStyle(.borderless).help("Show in Finder").disabled(e.path == DiskAnalyzer.oldDownloadsKey)
-            Button { toTrash = e } label: { Image(systemName: "trash") }
-                .buttonStyle(.borderless).help("Move to Trash")
+            Button { if e.path.hasSuffix(".app") { removeApp = e } else { toTrash = e } } label: { Image(systemName: "trash") }
+                .buttonStyle(.borderless).help(e.path.hasSuffix(".app") ? "Remove this app (app only, or with its files)" : "Move to Trash")
                 .disabled(protectedRoots.contains(e.path) || e.path.hasPrefix("/System") || stack.isEmpty)
         }
         .padding(.horizontal, 8).padding(.vertical, 6)

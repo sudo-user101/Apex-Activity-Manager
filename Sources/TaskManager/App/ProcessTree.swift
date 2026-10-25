@@ -123,6 +123,21 @@ enum ProcessTree {
         return sections
     }
 
+    /// The rows for this sample, built once: SwiftUI re-renders the view for
+    /// many reasons (selection, hover, sheets), and rebuilding ~600 rows each
+    /// time was most of Apex's memory churn on this page.
+    @MainActor private static var memo: (key: String, rows: [ProcRow])?
+
+    @MainActor static func cached(_ s: Snapshot, search: String, cpuScale: Double, sortKey: String, ascending: Bool,
+                                  optimized: Set<pid_t>, filter: ProcessFilter) -> [ProcRow] {
+        let key = "\(s.date.timeIntervalSinceReferenceDate)|\(search)|\(cpuScale)|\(sortKey)|\(ascending)|\(optimized.count)|\(optimized.hashValue)|\(filter.rawValue)"
+        if let m = memo, m.key == key { return m.rows }
+        let rows = build(s.processes, search: search, cpuScale: cpuScale, sortKey: sortKey, ascending: ascending,
+                         optimized: optimized, filter: filter)
+        memo = (key, rows)
+        return rows
+    }
+
     static func pids(for selection: Set<String>, in procs: [ProcessInfoSample]) -> [pid_t] {
         var out: [pid_t] = []
         for id in selection {

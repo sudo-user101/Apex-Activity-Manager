@@ -8,9 +8,9 @@ struct ProcessesView: View {
 
     var body: some View {
         @Bindable var model = model
-        let rows = ProcessTree.build(model.snapshot.processes, search: model.search,
-                                     cpuScale: model.cpuScale, sortKey: sortKey, ascending: sortAscending,
-                                     optimized: model.optimized, filter: model.processFilter)
+        let rows = ProcessTree.cached(model.snapshot, search: model.search,
+                                      cpuScale: model.cpuScale, sortKey: sortKey, ascending: sortAscending,
+                                      optimized: model.optimized, filter: model.processFilter)
         VStack(spacing: 0) {
             NativeOutline(
                 rows: rows, columns: ProcessColumns.all, autosaveName: "ProcessesOutline.v1",

@@ -298,10 +298,30 @@ func releaseAll() {
     if unlocked { smc.write("Ftst", 0); unlocked = false }
 }
 
+/// Lid-closed mode: system sleep disabled (`pmset disablesleep`) only while
+/// Apex keeps renewing `stayAwakeUntil`. A marker file records that the helper
+/// did it, so a helper that was killed undoes it on the next start, and a
+/// setting the user made with pmset themselves is never touched.
+let sleepMarker = "/Library/Application Support/Apex/sleep-disabled-by-apex"
+var sleepDisabled = FileManager.default.fileExists(atPath: sleepMarker)
+func setSleepDisabled(_ on: Bool) {
+    guard on != sleepDisabled else { return }
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/usr/bin/pmset")
+    p.arguments = ["-a", "disablesleep", on ? "1" : "0"]
+    guard (try? p.run()) != nil else { return }
+    p.waitUntilExit()
+    guard p.terminationStatus == 0 else { return }
+    sleepDisabled = on
+    if on { FileManager.default.createFile(atPath: sleepMarker, contents: Data()) }
+    else { try? FileManager.default.removeItem(atPath: sleepMarker) }
+}
+if sleepDisabled { setSleepDisabled(false) }   // left over from a helper that was killed
+
 for sig in [SIGTERM, SIGINT, SIGHUP] {
     signal(sig, SIG_IGN)
     let src = DispatchSource.makeSignalSource(signal: sig, queue: .main)
-    src.setEventHandler { releaseAll(); charger.release(); exit(0) }
+    src.setEventHandler { releaseAll(); charger.release(); setSleepDisabled(false); exit(0) }
     src.resume()
     _ = Unmanaged.passRetained(src as AnyObject)
 }
@@ -339,6 +359,9 @@ timer.setEventHandler {
                           chargingBlocked: charger.blocked, batteryPercent: percent, message: chargeMessage))
     }
     tick &+= 1
+
+    // Lid-closed mode (renewed by Apex; lapses on its own).
+    setSleepDisabled(FanControl.sleepDisabled(until: raw?.stayAwakeUntil))
 
     // Fans: only while Apex is running (fresh heartbeat).
     guard fanCount > 0, let raw, FanControl.isFresh(raw) else { releaseAll(); return }

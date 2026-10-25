@@ -73,6 +73,7 @@ final class AppModel {
     var expanded = Set<String>()           // expanded app / name groups
     var showRunTask = false
     var showFreeMemory = false
+    var showWelcome = false
     /// Performance graphs show the last N minutes (1–10; 10 minutes is recorded).
     var graphMinutes: Double = {
         let v = UserDefaults.standard.double(forKey: "graphMinutes")
@@ -103,7 +104,7 @@ final class AppModel {
         didSet { UserDefaults.standard.set(menuBarStyle, forKey: "menuBarStyle") }
     }
     var showMenuBar: Bool = UserDefaults.standard.object(forKey: "showMenuBar") as? Bool ?? true {
-        didSet { UserDefaults.standard.set(showMenuBar, forKey: "showMenuBar"); updateRunning() }
+        didSet { UserDefaults.standard.set(showMenuBar, forKey: "showMenuBar"); updateRunning(); StatusBar.shared.update() }
     }
     var historyEnabled: Bool = UserDefaults.standard.object(forKey: "historyEnabled") as? Bool ?? true {
         didSet { UserDefaults.standard.set(historyEnabled, forKey: "historyEnabled"); updateRunning() }
@@ -121,10 +122,18 @@ final class AppModel {
             updateRunning()
         }
     }
-    var keepsRunningInBackground: Bool { showMenuBar || historyEnabled || alertsEnabled }
+    var keepsRunningInBackground: Bool { showMenuBar || historyEnabled || alertsEnabled || Recorder.shared.recording }
     var adminPrompt: AdminPrompt?
     /// Processes currently in "Optimize" (Darwin background) mode.
     var optimized = Set<pid_t>()
+    /// Apps the user optimized, by bundle path. Remembered while they run
+    /// (closing Free Up Memory or relaunching Apex doesn't forget them), their
+    /// new helper processes are optimized too, and they're dropped when the
+    /// app quits. Restore All clears it.
+    var optimizedApps: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "optimizedApps") ?? []) {
+        didSet { UserDefaults.standard.set(Array(optimizedApps), forKey: "optimizedApps") }
+    }
+    @ObservationIgnored private var optimizeTried = Set<pid_t>()
     var errorMessage: String?
 
 
@@ -145,6 +154,8 @@ final class AppModel {
         DispatchQueue.main.async { self?.apply(snap) }
     }
     @ObservationIgnored private var windowVisible = false
+    /// A real Apex window is on screen (not closed, minimized or covered).
+    var isWindowVisible: Bool { windowVisible }
     @ObservationIgnored private var publishedOnce = false
     @ObservationIgnored private var observers: [NSObjectProtocol] = []
 
@@ -175,6 +186,11 @@ final class AppModel {
         case "storage": showCleanup = true
         default: break
         }
+        // Test switch: APEX_RECORD=1 (everything) or =cpu,memory,… starts recordings at launch (saved on quit).
+        if let v = ProcessInfo.processInfo.environment["APEX_RECORD"] {
+            let scopes = v == "1" ? [RecordScope.all] : v.split(separator: ",").compactMap { RecordScope(rawValue: String($0)) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { scopes.forEach { Recorder.shared.start($0) } }
+        }
     }
 
     func stop() { sampler.shutdown(); HistoryStore.shared.save(); DriveHealthStore.shared.save() }
@@ -192,6 +208,8 @@ final class AppModel {
         Alerts.shared.evaluate(s)
         HardwareStore.shared.recordCharge()
         DriveHealthStore.shared.update(s)
+        keepOptimized(s)
+        Recorder.shared.record(s)
         // File copies into each drive (event-driven; re-subscribed only when volumes change).
         let roots = Set(s.system.storageDevices.flatMap { $0.volumes.map(\.path) }).union([NSHomeDirectory()])
         if roots != transferRoots { transferRoots = roots; TransferMonitor.shared.watch(roots) }
@@ -235,7 +253,21 @@ final class AppModel {
     @ObservationIgnored private var gpuSampled = false
     @ObservationIgnored private var transferRoots = Set<String>()
 
+    /// Record started or stopped: it needs everything, even with the window closed.
+    func recordingChanged() {
+        // At the chosen rate, but no faster than every 2 s (keeps the file small).
+        sampler.setInterval(Recorder.shared.recording ? max(2, interval) : interval)
+        updateNeeds()
+        updateRunning()
+    }
+
     private func updateNeeds() {
+        if Recorder.shared.recording {
+            // Every process with its network and GPU use, window open or not.
+            gpuSampled = true
+            sampler.setNeeds(.init(network: true, gpu: true, restricted: true, processes: true, background: false))
+            return
+        }
         if windowVisible {
             // Performance includes the GPU page (top GPU processes, Local AI share).
             gpuSampled = [.processes, .ai, .performance].contains(section)
@@ -344,6 +376,12 @@ final class AppModel {
     /// Optimize: keep running, but at the lowest cost to the rest of the Mac.
     func setOptimized(pids: [pid_t], _ on: Bool) {
         guard !pids.isEmpty else { return }
+        let bundles = Set(pids.compactMap { process($0)?.bundlePath }.filter { !$0.isEmpty })
+        if on {
+            optimizedApps.formUnion(pids.compactMap { process($0) }.filter(\.isRegularApp).map(\.bundlePath).filter { !$0.isEmpty })
+        } else {
+            optimizedApps.subtract(bundles)
+        }
         let outcome = ProcessActions.optimize(pids: pids, on)
         if case .ok = outcome {
             // Optimistic update; the next sample confirms it from the kernel.
@@ -361,6 +399,30 @@ final class AppModel {
                 }
                 return r
             }))
+    }
+
+    /// Every optimized process (remembered apps with their helpers, and any
+    /// process in background mode), back to normal in one go.
+    func restoreAllOptimized() {
+        let pids = snapshot.processes.filter { $0.background || optimizedApps.contains($0.bundlePath) }.map(\.pid)
+        optimizedApps = []
+        if !pids.isEmpty { setOptimized(pids: pids, false) }
+    }
+
+    /// Keeps remembered apps optimized: helper processes they start later
+    /// join (each tried once; the app itself is never hidden again here, so
+    /// bringing it to the front sticks), and apps that quit are forgotten.
+    private func keepOptimized(_ s: Snapshot) {
+        guard !optimizedApps.isEmpty, !s.processes.isEmpty else { return }
+        let running = Set(s.processes.lazy.filter(\.isRegularApp).map(\.bundlePath))
+        let gone = optimizedApps.subtracting(running)
+        if !gone.isEmpty { optimizedApps.subtract(gone) }
+        let missing = s.processes.filter {
+            !$0.isRegularApp && !$0.background && optimizedApps.contains($0.bundlePath) && !optimizeTried.contains($0.pid)
+        }.map(\.pid)
+        guard !missing.isEmpty else { return }
+        optimizeTried.formUnion(missing)
+        _ = ProcessActions.optimize(pids: missing, true)
     }
 
     func toggleOptimizeSelected() {

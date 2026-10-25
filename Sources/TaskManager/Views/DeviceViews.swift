@@ -19,7 +19,18 @@ enum PerfItem: Hashable {
         else { self = .resource(Resource(rawValue: key) ?? .cpu) }
     }
 
-    /// Sidebar order: each device sits right under its kind (Disk, Network).
+    /// The sidebar row this page belongs to: drives live under Storage,
+    /// adapters under Network.
+    var resource: Resource {
+        switch self {
+        case .resource(let r): return r
+        case .disk: return .disk
+        case .net: return .network
+        }
+    }
+
+    /// Every page that exists right now. The sidebar shows one row per
+    /// resource; plugged-in drives and adapters are picked with `DeviceSwitcher`.
     static func all(_ s: SystemSnapshot) -> [PerfItem] {
         var out: [PerfItem] = []
         for r in Resource.allCases {
@@ -28,6 +39,20 @@ enum PerfItem: Hashable {
             if r == .network { out += s.networkDevices.map { .net($0.id) } }
         }
         return out
+    }
+
+    /// Pages that share a sidebar row with this one (the startup drive and
+    /// plugged-in drives; each network connection: Wi-Fi, Ethernet, VPN).
+    static func siblings(of item: PerfItem, in s: SystemSnapshot) -> [(PerfItem, String, String)] {
+        switch item.resource {
+        case .disk:
+            let main = s.disk.volumeName.isEmpty ? "This Mac" : s.disk.volumeName
+            return [(.resource(.disk), main, "internaldrive")] + s.storageDevices.map { (.disk($0.id), $0.name, $0.symbol) }
+        case .network:
+            return s.networkDevices.map { (.net($0.id), $0.name, $0.symbol) }
+        default:
+            return []
+        }
     }
 }
 
@@ -45,7 +70,11 @@ extension StorageDevice {
 }
 
 extension NetworkDevice {
-    var symbol: String { name.localizedCaseInsensitiveContains("iPhone") ? "iphone" : kind == "Wi-Fi" ? "wifi" : "cable.connector" }
+    var symbol: String {
+        if adapter.localizedCaseInsensitiveContains("iPhone") { return "iphone" }
+        switch kind { case "Wi-Fi": return "wifi"; case "VPN": return "lock.shield"; default: return "cable.connector" }
+    }
+    var isPlugIn: Bool { connection == "USB" || connection == "Thunderbolt" }
     var linkText: String {
         guard linkSpeed > 0 else { return "" }
         if linkSpeed >= 1_000_000_000 { return String(format: "%g Gb/s", Double(linkSpeed) / 1e9) }
@@ -54,62 +83,112 @@ extension NetworkDevice {
 }
 
 /// Graph timeline for a device's own samples.
-private func deviceTimeline(_ series: DeviceSeries?, minutes: Double) -> GraphTimeline? {
+func deviceTimeline(_ series: DeviceSeries?, minutes: Double) -> GraphTimeline? {
     guard let s = series, let end = s.times.last else { return nil }
     return GraphTimeline(times: s.times, window: minutes * 60, end: end)
 }
 
-struct DeviceCard: View {
+/// Tabs at the top of Storage and Network when more than one drive or
+/// connection is present, so they all live on one page.
+struct DeviceSwitcher: View {
     @Environment(AppModel.self) private var model
-    let item: PerfItem
+    let selected: PerfItem
+    @Binding var itemKey: String
+
+    private let arrivals = DeviceArrivals.shared
 
     var body: some View {
-        let s = model.snapshot.system
-        let series = model.history.devices[item.key]
-        HStack(spacing: 10) {
-            LineGraph(series: [.init(values: series?.a ?? [], color: isDisk ? .green : .orange),
-                               .init(values: series?.b ?? [], color: isDisk ? .red : .blue, fill: false)],
-                      maxValue: nil, gridLines: false, cornerRadius: 4)
-                .environment(\.graphTimeline, deviceTimeline(series, minutes: model.graphMinutes))
-                .frame(width: 64, height: 38)
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 4) {
-                    Image(systemName: symbol(s)).font(.caption).foregroundStyle(.secondary)
-                    Text(title(s)).font(.headline).lineLimit(1)
-                }
-                Text(summary(s)).font(.caption).foregroundStyle(.secondary).monospacedDigit().lineLimit(1)
+        let tabs = PerfItem.siblings(of: selected, in: model.snapshot.system)
+        let devices = tabs.dropFirst().map { "\($0.0.key)|\($0.1)" }
+        HStack(spacing: 12) {
+            if tabs.count > 1 {
+                TabStrip(tabs: tabs.map { ($0.0.key, $0.1, $0.2) }, selected: selected.key, pending: arrivals.pending) { itemKey = $0 }
+                    .help(selected.resource == .disk ? "Switch between drives" : "Switch between connections")
+            }
+            if let note = arrivals.note {
+                Label(note.text, systemImage: note.symbol)
+                    .font(.callout).foregroundStyle(.secondary)
+                    .padding(.horizontal, 10).padding(.vertical, 4)
+                    .background(.quaternary.opacity(0.6), in: Capsule())
+                    .transition(.move(edge: .leading).combined(with: .opacity))
             }
         }
-        .padding(.vertical, 4)
-        .help(isDisk ? "Plugged-in drive" : "Plugged-in network adapter")
+        .animation(.spring(duration: 0.35), value: tabs.map(\.0.key))
+        .animation(.easeOut(duration: 0.25), value: arrivals.note)
+        .onChange(of: devices, initial: true) { _, list in arrivals.update(list, kind: selected.resource) }
+    }
+}
+
+/// Drives and connections coming and going: a new one shows "Connecting…"
+/// on its tab while it's read, and a short note says what happened.
+@MainActor @Observable
+final class DeviceArrivals {
+    static let shared = DeviceArrivals()
+    struct Note: Equatable { var text: String; var symbol: String }
+    private(set) var pending = Set<String>()
+    private(set) var note: Note?
+    @ObservationIgnored private var known: [Resource: [String: String]] = [:]
+
+    /// `list` items are "key|name".
+    func update(_ list: [String], kind: Resource) {
+        let now = Dictionary(list.map { s -> (String, String) in
+            let p = s.split(separator: "|", maxSplits: 1).map(String.init)
+            return (p[0], p.count > 1 ? p[1] : p[0])
+        }, uniquingKeysWith: { a, _ in a })
+        defer { known[kind] = now }
+        guard let old = known[kind] else { return }          // first look: nothing "arrived"
+        let disk = kind == .disk
+        for (k, name) in now where old[k] == nil {
+            pending.insert(k)
+            show(.init(text: "“\(name)” connected", symbol: disk ? "externaldrive.badge.plus" : "cable.connector"))
+            Task { try? await Task.sleep(for: .seconds(1.6)); pending.remove(k) }
+        }
+        for (k, name) in old where now[k] == nil {
+            show(.init(text: "“\(name)” " + (disk ? "ejected" : "disconnected"), symbol: disk ? "eject" : "cable.connector.slash"))
+        }
     }
 
-    private var isDisk: Bool { if case .disk = item { return true }; return false }
+    private func show(_ n: Note) {
+        note = n
+        Task {
+            try? await Task.sleep(for: .seconds(3.5))
+            if note == n { note = nil }
+        }
+    }
+}
 
-    private func title(_ s: SystemSnapshot) -> String {
-        switch item {
-        case .disk(let id): return s.storageDevices.first { $0.id == id }?.name ?? "Drive"
-        case .net(let id): return s.networkDevices.first { $0.id == id }?.name ?? id
-        case .resource(let r): return r.title
+/// Tabs at the top of a Performance page (drives, connections, displays).
+/// Plain buttons, not a segmented Picker: a Picker writes its own choice back
+/// when tabs come and go, which would switch pages on its own.
+struct TabStrip: View {
+    let tabs: [(key: String, title: String, symbol: String)]
+    let selected: String
+    /// Tabs still being set up (a drive just plugged in): a spinner instead of the icon.
+    var pending: Set<String> = []
+    let onSelect: (String) -> Void
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(tabs, id: \.key) { tab in
+                let on = tab.key == selected
+                Button { onSelect(tab.key) } label: {
+                    HStack(spacing: 6) {
+                        if pending.contains(tab.key) { ProgressView().controlSize(.mini) }
+                        else { Image(systemName: tab.symbol) }
+                        Text(pending.contains(tab.key) ? "Connecting…" : tab.title)
+                    }
+                    .lineLimit(1)
+                    .padding(.horizontal, 10).padding(.vertical, 4)
+                    .background(on ? Color.accentColor : .clear, in: RoundedRectangle(cornerRadius: 6))
+                    .foregroundStyle(on ? Color.white : .primary)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .transition(.scale(scale: 0.6).combined(with: .opacity))
+            }
         }
-    }
-    private func symbol(_ s: SystemSnapshot) -> String {
-        switch item {
-        case .disk(let id): return s.storageDevices.first { $0.id == id }?.symbol ?? "externaldrive"
-        case .net(let id): return s.networkDevices.first { $0.id == id }?.symbol ?? "cable.connector"
-        case .resource: return "circle"
-        }
-    }
-    private func summary(_ s: SystemSnapshot) -> String {
-        switch item {
-        case .disk(let id):
-            guard let d = s.storageDevices.first(where: { $0.id == id }) else { return "" }
-            return "R \(Fmt.rate(d.readPerSec))  W \(Fmt.rate(d.writePerSec))"
-        case .net(let id):
-            guard let d = s.networkDevices.first(where: { $0.id == id }) else { return "" }
-            return d.isUp ? "↓ \(Fmt.rate(d.inPerSec))  ↑ \(Fmt.rate(d.outPerSec))" : "Not connected"
-        case .resource: return ""
-        }
+        .padding(2)
+        .background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 8))
     }
 }
 
@@ -134,7 +213,7 @@ private func slowWarning(_ u: USBLink) -> some View {
 }
 
 /// `extraAt` puts `extra` before that item (default: at the end).
-private func statsGrid(_ items: [(String, String)], extra: AnyView? = nil, extraAt: Int? = nil) -> some View {
+func statsGrid(_ items: [(String, String)], extra: AnyView? = nil, extraAt: Int? = nil) -> some View {
     let split = min(extraAt ?? items.count, items.count)
     return LazyVGrid(columns: [GridItem(.adaptive(minimum: 170), alignment: .topLeading)], alignment: .leading, spacing: 12) {
         ForEach(items[..<split], id: \.0) { statCell($0) }
@@ -145,7 +224,7 @@ private func statsGrid(_ items: [(String, String)], extra: AnyView? = nil, extra
     .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
 }
 
-private func statCell(_ item: (String, String)) -> some View {
+func statCell(_ item: (String, String)) -> some View {
     VStack(alignment: .leading, spacing: 2) {
         Text(item.0).font(.caption).foregroundStyle(.secondary)
         Text(item.1).font(.body.weight(.medium)).monospacedDigit().lineLimit(1).truncationMode(.middle)
@@ -166,7 +245,7 @@ struct StorageDeviceDetail: View {
         let d = device
         let series = model.history.devices["disk:" + d.id]
         VStack(alignment: .leading, spacing: 16) {
-            PageHeader(title: d.name, subtitle: d.subtitleLine, accessory: AnyView(headerButtons))
+            PageHeader(title: d.name, subtitle: d.subtitleLine, accessory: AnyView(headerButtons), record: .disk)
             if let e = ejectError {
                 Label(e, systemImage: "exclamationmark.triangle.fill").font(.callout).foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
@@ -218,7 +297,7 @@ struct StorageDeviceDetail: View {
                     .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
                 }
             }
-            Text("Which apps are reading or writing this drive isn’t reported separately by macOS; the Disk page’s top processes cover every drive.")
+            Text("Which apps are reading or writing this drive isn’t reported separately by macOS; the top processes under Macintosh HD cover every drive.")
                 .font(.caption).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
         }
         .sheet(isPresented: toolsSheet) {
@@ -278,40 +357,6 @@ struct StorageDeviceDetail: View {
 }
 
 /// Network page for one plugged-in adapter (USB / Thunderbolt Ethernet, iPhone…).
-struct NetworkDeviceDetail: View {
-    @Environment(AppModel.self) private var model
-    let device: NetworkDevice
-
-    var body: some View {
-        let d = device
-        let series = model.history.devices["net:" + d.id]
-        VStack(alignment: .leading, spacing: 16) {
-            PageHeader(title: d.name,
-                       subtitle: [d.usb?.short ?? d.connection, d.kind, d.isUp ? d.linkText : "not connected"].filter { !$0.isEmpty }.joined(separator: " · "),
-                       subtitleColor: d.isUp ? .secondary : .orange)
-            if let u = d.usb, u.slowerThanItCould { slowWarning(u) }
-            HStack { legend([("Received", .orange), ("Sent", .blue)]); Spacer(); RangeCaption() }
-            LineGraph(series: [.init(values: series?.a ?? [], color: .orange, name: "Received"),
-                               .init(values: series?.b ?? [], color: .blue, fill: false, name: "Sent")], maxValue: nil)
-                .environment(\.graphTimeline, deviceTimeline(series, minutes: model.graphMinutes))
-                .environment(\.graphUnit, .rate)
-                .frame(height: 180)
-            statsGrid([
-                ("Receiving", Fmt.rate(d.inPerSec)), ("Sending", Fmt.rate(d.outPerSec)),
-                ("Received since plugged in", Fmt.diskBytes(d.totalIn)), ("Sent since plugged in", Fmt.diskBytes(d.totalOut)),
-                ("Status", d.isUp ? "Connected" : "Not connected"), ("Link speed", d.linkText.isEmpty ? "—" : d.linkText),
-                ("IP address", d.address.isEmpty ? "—" : d.address), ("Hardware address", d.hardwareAddress.isEmpty ? "—" : d.hardwareAddress),
-                ("Interface", d.id), ("Connection", d.usb?.connectedAs ?? d.connection),
-                ("Supports", d.usb.map { $0.supports.isEmpty ? "—" : $0.supports } ?? "—"),
-            ])
-            if !d.isUp {
-                Text("The adapter is plugged in but has no network link. Check the cable or the other end.")
-                    .font(.callout).foregroundStyle(.secondary)
-            }
-        }
-    }
-}
-
 // MARK: Drive health
 
 extension DriveHealthStatus {

@@ -60,6 +60,12 @@ enum SafeAction: Hashable, Sendable {
     case openTimeMachine
     case openStorageSettings
     case freeUpSpace              // Apex's Storage hub (review before anything is deleted)
+    // Network
+    case restartWiFi              // Wi-Fi off and on again (no admin)
+    case openNetworkSettings
+    case openWiFiSettings
+    case openLoginPage            // the network's sign-in page (captive portal)
+    case testSpeed                // run the Network Doctor's checks again
 
     var title: String {
         switch self {
@@ -68,6 +74,11 @@ enum SafeAction: Hashable, Sendable {
         case .openTimeMachine: return "Time Machine Settings"
         case .openStorageSettings: return "Storage Settings"
         case .freeUpSpace: return "Free Up Space…"
+        case .restartWiFi: return "Turn Wi-Fi Off and On"
+        case .openNetworkSettings: return "Network Settings"
+        case .openWiFiSettings: return "Wi-Fi Settings"
+        case .openLoginPage: return "Open the Sign-In Page"
+        case .testSpeed: return "Check Again"
         }
     }
 }

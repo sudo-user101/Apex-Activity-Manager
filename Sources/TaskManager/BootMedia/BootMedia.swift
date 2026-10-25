@@ -50,12 +50,17 @@ enum BootMedia {
         return nil
     }
 
+    static let driversFolder = "$WinPEDriver$"
+
     struct Job: Sendable {
         var image: BootImage
         var device: StorageDevice
         var scheme: PartitionScheme = .gpt
         var label = ""
         var options = WindowsSetupOptions()
+        /// A folder of drivers on this Mac, copied to the drive as `$WinPEDriver$`
+        /// (Windows Setup loads it by itself, during setup and into the new Windows).
+        var drivers: String?
         var verify = true
         var fullVerify = false
     }
@@ -72,6 +77,11 @@ enum BootMedia {
                 progress(nil, "Adding your setup options…")
                 do { try xml.write(toFile: dest + "/" + Autounattend.fileName, atomically: false, encoding: .utf8) }
                 catch { return "Couldn’t write the setup options: \(error.localizedDescription)" }
+            }
+            if let d = job.drivers {
+                progress(nil, "Adding your drivers…")
+                do { try FileManager.default.copyItem(atPath: d, toPath: dest + "/" + BootMedia.driversFolder) }
+                catch { return "Couldn’t copy the drivers: \(error.localizedDescription)" }
             }
             guard job.verify else { return nil }
             let wim = src + "/sources/install.wim"

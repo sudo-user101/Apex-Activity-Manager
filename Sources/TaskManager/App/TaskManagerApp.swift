@@ -16,13 +16,6 @@ struct TaskManagerApp: App {
         .defaultSize(width: 1240, height: 760)
         .commands { AppCommands(model: model) }
 
-        MenuBarExtra(isInserted: Binding(get: { model.showMenuBar }, set: { model.showMenuBar = $0 })) {
-            MenuBarPanel().environment(model)
-        } label: {
-            MenuBarLabel().environment(model)
-        }
-        .menuBarExtraStyle(.window)
-
         Settings {
             SettingsView()
                 .environment(model)
@@ -37,6 +30,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Alerts.shared.start()
             MemoryGuard.start()
             DeviceWatcher.shared.start()
+            StatusBar.shared.update()
+            ClipboardHistory.shared.start()
+            FloatingShelf.shared.start()
+            LidAwake.shared.start()
+            DisplayStore.shared.reload()      // the Display card's arrangement; refreshed when displays change
         }
     }
 
@@ -54,6 +52,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         MainActor.assumeIsolated {
             FanController.shared.restoreAutomatic()   // fans back to macOS
+            Recorder.shared.stopAll()                 // closes the files with their summaries
             AppModel.shared.stop()
         }
     }
@@ -85,6 +84,9 @@ struct AppCommands: Commands {
             }
             Divider()
         }
+        CommandGroup(replacing: .help) {
+            Button("Welcome to Apex…") { model.showWelcome = true; model.openMainWindow?() }
+        }
         CommandMenu("Process") {
             Button("Quit Process") { model.endSelected(force: false) }
                 .keyboardShortcut(.delete, modifiers: .command)
@@ -97,6 +99,8 @@ struct AppCommands: Commands {
                 .disabled(model.selectedPIDs.isEmpty)
             Button("What’s Using a File or Disk…") { model.showWhoIsUsing = true }
                 .keyboardShortcut("u", modifiers: [.command, .shift])
+            Button(Recorder.shared.isRecording(.all) ? "Stop Recording" : "Start Recording") { Recorder.shared.toggle(.all) }
+                .keyboardShortcut("r", modifiers: [.command, .option])
             Divider()
             Button("Get Info") { model.showInfo() }
                 .keyboardShortcut("i")
@@ -130,6 +134,16 @@ struct AlertSettings: View {
             Toggle("When your Mac is running hot", isOn: $s.heat)
             Toggle("When your disk is almost full or filling up fast", isOn: $s.disk)
             Toggle("Record heavy disk writing in History", isOn: $s.diskWrites)
+            HStack {
+                Toggle("Record network traffic over", isOn: $s.network)
+                Picker("", selection: $s.networkThreshold) {
+                    ForEach([1_000_000.0, 5_000_000, 10_000_000, 50_000_000], id: \.self) { Text(Fmt.rate($0)).tag($0) }
+                }
+                .labelsHidden().fixedSize().disabled(!s.network)
+                Text("for").foregroundStyle(s.network ? .primary : .secondary)
+                Picker("", selection: $s.networkMinutes) { ForEach([1.0, 2, 5, 10], id: \.self) { Text(Fmt.duration($0 * 60)).tag($0) } }
+                    .labelsHidden().fixedSize().disabled(!s.network)
+            }
             Toggle("Record short spikes in History", isOn: $s.recordSpikes)
             Text("Alerts need a problem to last: an app over the limit for the time you pick, memory critical for 30s, heat for 30s. Shorter spikes are only recorded. See them in History › Events.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
@@ -171,8 +185,52 @@ struct SettingsView: View {
             AlertSettings().disabled(!model.alertsEnabled)
             Text("With the window closed, Apex keeps these running by sampling every 10s — about 1% of one core.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+
+            Divider().padding(.vertical, 6)
+            LabeledContent("Permissions:") {
+                Button("Review Permissions…") { model.showWelcome = true; model.openMainWindow?() }
+            }
+            FloatingShelfToggle()
+            BluetoothTypeSettings()
         }
         .padding(20)
         .frame(width: 500)
+    }
+}
+
+/// Settings: pop the shelf up when a file drag starts.
+struct FloatingShelfToggle: View {
+    @State private var on = FloatingShelf.shared.enabled
+    var body: some View {
+        Toggle("Show the shelf when you start dragging a file (wiggle the file for a new shelf)", isOn: $on)
+            .onChange(of: on) { FloatingShelf.shared.enabled = on }
+    }
+}
+
+/// Settings › Bluetooth accessories: what each connected device is, so the
+/// Accessories popover can estimate its power use.
+struct BluetoothTypeSettings: View {
+    @State private var devices: [AccessoryControl.BluetoothDevice] = []
+
+    var body: some View {
+        LabeledContent("Bluetooth accessories:") {
+            VStack(alignment: .leading, spacing: 6) {
+                if devices.isEmpty {
+                    Text("No Bluetooth devices connected.").foregroundStyle(.secondary)
+                }
+                ForEach(devices) { d in
+                    Picker(d.name, selection: Binding(get: { d.type }, set: { t in
+                        BluetoothTypes.set(t, for: d.address)
+                        devices = AccessoryControl.bluetoothDevices()
+                    })) {
+                        ForEach(BluetoothType.allCases) { t in Text(t.title).tag(t) }
+                    }
+                    .fixedSize()
+                }
+                Text("Pick what each device is. Energy › Accessories shows a typical power figure for that type; macOS doesn’t measure accessories’ real power use.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .task { devices = await Task.detached(priority: .utility) { AccessoryControl.bluetoothDevices() }.value }
     }
 }

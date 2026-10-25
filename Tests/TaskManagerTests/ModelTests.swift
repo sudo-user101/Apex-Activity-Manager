@@ -122,3 +122,40 @@ final class LevelTests: XCTestCase {
         XCTAssertEqual(Fmt.minutes(125), "2h 5m")
     }
 }
+
+final class PowerTelemetryTests: XCTestCase {
+    func testParsesSignedBatteryFlow() {
+        // Real values from this Mac on battery: BatteryPower is −5.498 W stored unsigned.
+        let t: [String: Any] = ["SystemLoad": NSNumber(value: 5498), "SystemPowerIn": NSNumber(value: 0),
+                                "BatteryPower": NSNumber(value: UInt64(18446744073709546118))]
+        let p = PowerTelemetry.parse(t)
+        XCTAssertEqual(p.load ?? 0, 5.498, accuracy: 0.001)
+        XCTAssertEqual(p.charger ?? -1, 0, accuracy: 0.001)
+        XCTAssertEqual(p.battery ?? 0, -5.498, accuracy: 0.001, "draining")
+        XCTAssertNil(PowerTelemetry.parse([:]).load)
+    }
+}
+
+final class AssistantTests: XCTestCase {
+    func testParsesModelList() {
+        let json = #"{"data":[{"id":"qwen2.5-7b-instruct"},{"id":"text-embedding-nomic"},{"id":"llama-3.2-3b"}]}"#
+        XCTAssertEqual(Assistant.parseModels(Data(json.utf8)), ["llama-3.2-3b", "qwen2.5-7b-instruct"], "embedding models left out")
+    }
+
+    func testParsesStreamedPieces() {
+        XCTAssertEqual(Assistant.parseStreamLine(#"data: {"choices":[{"delta":{"content":"Hel"}}]}"#), "Hel")
+        XCTAssertNil(Assistant.parseStreamLine("data: [DONE]"))
+        XCTAssertNil(Assistant.parseStreamLine(#"data: {"choices":[{"delta":{"role":"assistant"}}]}"#))
+        XCTAssertNil(Assistant.parseStreamLine(": keep-alive"))
+    }
+
+    func testContextHasTheLiveReadings() {
+        var s = Snapshot()
+        s.system.memory.total = 8 << 30; s.system.memory.used = 6 << 30
+        s.system.disk.capacity = 250_000_000_000; s.system.disk.available = 20_000_000_000
+        let text = AssistantContext.build(s, events: [], battery: nil)
+        XCTAssertTrue(text.contains("Memory: 6"), text)
+        XCTAssertTrue(text.contains("Startup disk: 20"), text)
+        XCTAssertFalse(text.contains("Battery"), "desktop: no battery line")
+    }
+}

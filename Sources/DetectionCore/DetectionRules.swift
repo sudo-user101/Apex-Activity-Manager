@@ -13,11 +13,13 @@ public struct AppLoad: Sendable, Equatable {
     public var name: String
     public var cpu: Double           // % of one core, summed over the app's processes
     public var diskWritePerSec: Double
+    public var netPerSec: Double     // sent + received; 0 when per-app traffic isn't being measured
     public var memory: UInt64        // footprint, summed over the app's processes
     public var pids: [Int32]
-    public init(key: String, name: String, cpu: Double, diskWritePerSec: Double = 0, memory: UInt64 = 0, pids: [Int32] = []) {
+    public init(key: String, name: String, cpu: Double, diskWritePerSec: Double = 0, netPerSec: Double = 0,
+                memory: UInt64 = 0, pids: [Int32] = []) {
         self.key = key; self.name = name; self.cpu = cpu; self.diskWritePerSec = diskWritePerSec
-        self.memory = memory; self.pids = pids
+        self.netPerSec = netPerSec; self.memory = memory; self.pids = pids
     }
 }
 
@@ -43,13 +45,16 @@ public struct DetectionSample: Sendable {
     public var diskCapacity: UInt64
     public var volumeName: String
     public var diskWritePerSec: Double
+    public var networkPerSec: Double     // received + sent, all interfaces
 
     public init(date: Date, apps: [AppLoad] = [], pressure: PressureState = .normal, memoryUsedPercent: Double = 0,
                 swapUsed: UInt64 = 0, memoryTotal: UInt64 = 0, thermal: ThermalState = .nominal, diskAvailable: UInt64 = 0,
-                diskCapacity: UInt64 = 0, volumeName: String = "Macintosh HD", diskWritePerSec: Double = 0) {
+                diskCapacity: UInt64 = 0, volumeName: String = "Macintosh HD", diskWritePerSec: Double = 0,
+                networkPerSec: Double = 0) {
         self.date = date; self.apps = apps; self.pressure = pressure; self.memoryUsedPercent = memoryUsedPercent
         self.swapUsed = swapUsed; self.memoryTotal = memoryTotal; self.thermal = thermal; self.diskAvailable = diskAvailable
         self.diskCapacity = diskCapacity; self.volumeName = volumeName; self.diskWritePerSec = diskWritePerSec
+        self.networkPerSec = networkPerSec
     }
 }
 
@@ -62,7 +67,7 @@ public enum Severity: String, Sendable, Codable, Comparable, CaseIterable {
 }
 
 public enum Rule: String, Sendable, Codable, CaseIterable {
-    case appCPU, memoryPressure, thermal, diskSpace, diskFilling, diskWrites, memoryGrowth, swapGrowth, driveHealth
+    case appCPU, memoryPressure, thermal, diskSpace, diskFilling, diskWrites, memoryGrowth, swapGrowth, driveHealth, network
     public var title: String {
         switch self {
         case .driveHealth: return "Drive health"
@@ -74,6 +79,7 @@ public enum Rule: String, Sendable, Codable, CaseIterable {
         case .diskSpace: return "Low disk space"
         case .diskFilling: return "Disk filling fast"
         case .diskWrites: return "Heavy disk writing"
+        case .network: return "Heavy network traffic"
         }
     }
 }
@@ -133,6 +139,10 @@ public struct DetectionSettings: Sendable, Codable, Equatable {
     public var recordSpikes = true
     /// Apps whose memory climbs steadily (possible leak), and swap growing fast.
     public var memoryGrowth = true
+    /// Record heavy network traffic (sent + received) in History.
+    public var network = true
+    public var networkThreshold: Double = 10_000_000  // bytes/s
+    public var networkMinutes: Double = 2
     public init() {}
 
     // Decode older saved settings that lack newer keys.
@@ -150,6 +160,9 @@ public struct DetectionSettings: Sendable, Codable, Equatable {
         writeMinutes = try c.decodeIfPresent(Double.self, forKey: .writeMinutes) ?? d.writeMinutes
         recordSpikes = try c.decodeIfPresent(Bool.self, forKey: .recordSpikes) ?? d.recordSpikes
         memoryGrowth = try c.decodeIfPresent(Bool.self, forKey: .memoryGrowth) ?? d.memoryGrowth
+        network = try c.decodeIfPresent(Bool.self, forKey: .network) ?? d.network
+        networkThreshold = try c.decodeIfPresent(Double.self, forKey: .networkThreshold) ?? d.networkThreshold
+        networkMinutes = try c.decodeIfPresent(Double.self, forKey: .networkMinutes) ?? d.networkMinutes
     }
 }
 
@@ -218,6 +231,7 @@ public struct DetectionEngine: Sendable {
     private var pressureWarning = Sustained(grace: 15)
     private var hot = Sustained(grace: 10)
     private var writes = Sustained(grace: 10)
+    private var traffic = Sustained(grace: 10)
     private var diskTrail: [(Date, UInt64)] = []
     private var memoryTrails: [String: [(Date, Double)]] = [:]
     private var swapTrail: [(Date, UInt64)] = []
@@ -244,13 +258,13 @@ public struct DetectionEngine: Sendable {
     public static let swapWindow: TimeInterval = 900
     /// Shortest over-threshold run worth recording as a spike, per rule.
     static func minSpike(_ r: Rule) -> TimeInterval {
-        switch r { case .appCPU: return 30; case .diskWrites: return 20; default: return 0 }
+        switch r { case .appCPU: return 30; case .diskWrites, .network: return 20; default: return 0 }
     }
     static func cooldown(_ r: Rule, _ kind: EventKind) -> TimeInterval {
         if kind == .spike { return 600 }
         switch r {
         case .appCPU, .memoryPressure: return 1800
-        case .thermal, .diskFilling, .diskWrites, .swapGrowth: return 3600
+        case .thermal, .diskFilling, .diskWrites, .network, .swapGrowth: return 3600
         case .memoryGrowth: return 6 * 3600
         case .diskSpace, .driveHealth: return 86400
         }
@@ -270,6 +284,7 @@ public struct DetectionEngine: Sendable {
         if settings.heat { evaluateHeat(s, &out) } else { hot.reset() }
         if settings.disk { evaluateDisk(s, &out) } else { diskTrail.removeAll() }
         if settings.diskWrites { evaluateWrites(s, &out) } else { writes.reset() }
+        if settings.network { evaluateNetwork(s, &out) } else { traffic.reset() }
         if settings.memoryGrowth { evaluateGrowth(s, &out); evaluateSwap(s, &out) } else { memoryTrails.removeAll(); swapTrail.removeAll() }
         return out.filter { e in
             if let last = lastFired[e.key], now.timeIntervalSince(last) < Self.cooldown(e.rule, e.kind) { return false }
@@ -427,6 +442,31 @@ public struct DetectionEngine: Sendable {
                 summary: "Averaging \(f(.diskWrites, ep.average)) for \(Self.dur(ep.duration)).",
                 reason: "The disk was written at over \(f(.diskWrites, settings.writeThreshold)) for \(Self.dur(ep.duration)) (recorded after \(Self.dur(need))).",
                 extra: top, subject: writers.first?.name, pids: writers.flatMap(\.pids), notify: false))
+        }
+    }
+
+    // 5b. Heavy network traffic for minutes (recorded: a big upload or download,
+    // a sync or backup, or something unexpected sending data).
+    private mutating func evaluateNetwork(_ s: DetectionSample, _ out: inout [DetectionEvent]) {
+        let need = settings.networkMinutes * 60
+        let users = s.apps.filter { $0.netPerSec > 100_000 }.sorted { $0.netPerSec > $1.netPerSec }.prefix(3)
+        let top = users.map { Evidence("Top app", "\($0.name) · \(f(.network, $0.netPerSec))") }
+        let trafficFired = traffic.fired
+        if let ep = traffic.update(active: s.networkPerSec >= settings.networkThreshold, value: s.networkPerSec, at: s.date),
+           !trafficFired, settings.recordSpikes, ep.duration >= Self.minSpike(.network), ep.duration < need {
+            out.append(event(.network, key: "spike:network", s.date, ep, .info, .spike,
+                title: "Burst of network traffic",
+                summary: "Up to \(f(.network, ep.peak)) for \(Self.dur(ep.duration)).",
+                reason: "Traffic went over \(f(.network, settings.networkThreshold)) but dropped before \(Self.dur(need)).",
+                notify: false))
+        }
+        if !traffic.fired, let ep = traffic.current(at: s.date), ep.duration >= need {
+            traffic.markFired()
+            out.append(event(.network, key: "network", s.date, ep, .info, .sustained,
+                title: "Heavy network traffic",
+                summary: "Averaging \(f(.network, ep.average)) for \(Self.dur(ep.duration)).",
+                reason: "This Mac sent and received over \(f(.network, settings.networkThreshold)) for \(Self.dur(ep.duration)) (recorded after \(Self.dur(need))).",
+                extra: top, subject: users.first?.name, pids: users.flatMap(\.pids), notify: false))
         }
     }
 

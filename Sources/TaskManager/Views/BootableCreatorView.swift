@@ -18,6 +18,7 @@ struct BootableCreatorView: View {
     @State private var inspecting = false
     @State private var options = WindowsSetupOptions()
     @State private var useMacRegion = false
+    @State private var drivers: String?
     @State private var scheme: PartitionScheme = .gpt
     @State private var verify = true
     @State private var fullVerify = false
@@ -253,7 +254,30 @@ struct BootableCreatorView: View {
                 }
                 group("Region and privacy", note: nil) {
                     Toggle("Use this Mac’s region and keyboard (\(Self.macLocale))", isOn: $useMacRegion)
+                    let tz = Autounattend.windowsTimeZone()
+                    if !tz.isEmpty {
+                        Toggle("Use this Mac’s time zone (\(tz))", isOn: Binding(get: { options.timeZone == tz },
+                                                                                set: { options.timeZone = $0 ? tz : "" }))
+                    }
                     Toggle("Choose the most private answers to Windows’ privacy questions", isOn: $options.minimalPrivacy)
+                }
+                group("This PC", note: "Device encryption normally turns on by itself and needs your Microsoft account to unlock if something changes. Turning it off lets you switch on BitLocker yourself later, once you've saved the recovery key.") {
+                    HStack {
+                        Text("Computer name")
+                        TextField("Optional, e.g. OFFICE-PC", text: $options.computerName).textFieldStyle(.roundedBorder).frame(width: 200)
+                        if !options.computerName.isEmpty && Autounattend.cleanComputerName(options.computerName) != options.computerName {
+                            Text("→ \(Autounattend.cleanComputerName(options.computerName))").font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    Toggle("Don’t turn on device encryption automatically", isOn: $options.noAutoEncryption)
+                }
+                group("Drivers", note: "For PCs whose disk or Wi-Fi Windows Setup doesn't see (common on new laptops with Intel RST / VMD, or new Wi-Fi chips). Get the drivers from the PC maker; Apex copies the folder to the drive as $WinPEDriver$, which Windows Setup loads by itself during setup and into the new Windows.") {
+                    HStack {
+                        Text(drivers.map { (($0 as NSString).lastPathComponent) } ?? "No drivers added").foregroundStyle(drivers == nil ? .secondary : .primary)
+                        Spacer()
+                        if drivers != nil { Button("Remove") { drivers = nil } }
+                        Button("Choose Folder…") { chooseDrivers() }
+                    }
                 }
                 group("Apps to install at first sign-in", note: "Installed with winget, Windows’ own package manager, from each app’s official source. Needs an internet connection at first sign-in and takes a few minutes after the desktop appears. Windows 10 PCs without the App Installer update skip this.") {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 200), alignment: .leading)], alignment: .leading, spacing: 6) {
@@ -360,6 +384,11 @@ struct BootableCreatorView: View {
         if !name.isEmpty { s.append("local account “\(name)”") }
         if !o.locale.isEmpty { s.append("region \(o.locale)") }
         if o.minimalPrivacy { s.append("most private answers") }
+        let pc = Autounattend.cleanComputerName(o.computerName)
+        if !pc.isEmpty { s.append("PC name “\(pc)”") }
+        if !o.timeZone.isEmpty { s.append("time zone \(o.timeZone)") }
+        if o.noAutoEncryption { s.append("no automatic device encryption") }
+        if drivers != nil { s.append("drivers added") }
         return s.isEmpty ? "None (a normal Windows installation)" : s.joined(separator: ", ").prefix(1).uppercased() + s.joined(separator: ", ").dropFirst()
     }
 
@@ -416,11 +445,18 @@ struct BootableCreatorView: View {
         }
     }
 
+    private func chooseDrivers() {
+        let p = NSOpenPanel()
+        p.canChooseDirectories = true; p.canChooseFiles = false; p.allowsMultipleSelection = false
+        p.message = "Choose the folder with the PC's drivers (.inf files and their files)"
+        if p.runModal() == .OK, let u = p.url { drivers = u.path }
+    }
+
     private func start() {
         guard let img = image, let d = device, d.registryID == lockedRegistryID, understood, problem == nil else { return }
         step = .create; running = true; result = nil; fraction = nil; status = "Starting…"
         cancel = DriveTools.CancelFlag()
-        let job = BootMedia.Job(image: img, device: d, scheme: scheme, label: "", options: options,
+        let job = BootMedia.Job(image: img, device: d, scheme: scheme, label: "", options: options, drivers: drivers,
                                 verify: verify && img.canVerify, fullVerify: fullVerify)
         let flag = cancel
         Task {
