@@ -1,0 +1,91 @@
+name: Bug report
+description: Something in Apex doesn't work, shows a wrong number, or crashes.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time. The more exact the details, the faster it can be fixed.
+        **Security problems:** please don't post them here; see the [security policy](https://github.com/sudo-user101/Apex-Activity-Manager/security/policy).
+  - type: input
+    id: apex-version
+    attributes:
+      label: Apex version
+      description: Apex Activity Manager › About Apex Activity Manager.
+      placeholder: "1.2.0"
+    validations:
+      required: true
+  - type: input
+    id: macos-version
+    attributes:
+      label: macOS version
+      description: Apple menu › About This Mac.
+      placeholder: "macOS 15.1 Sequoia"
+    validations:
+      required: true
+  - type: input
+    id: mac-model
+    attributes:
+      label: Mac model
+      description: Apple menu › About This Mac (the model name and year), and the chip.
+      placeholder: "MacBook Air (M2, 2022)"
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Where in Apex
+      options:
+        - Processes
+        - Performance (CPU, memory, disk, network, GPU, display, energy, sensors)
+        - Storage (Optimize, Analyze, Clean)
+        - Drives (Drive Doctor, transfers, Bootable Media Creator)
+        - Battery and charging (charge limit, schedules, helper)
+        - Menu bar or shelf
+        - Alerts or history
+        - Startup, users or services
+        - Installing or opening Apex
+        - Somewhere else
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you saw, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to make it happen
+      description: Numbered steps from opening Apex, so it can be reproduced.
+      placeholder: |
+        1. Open Apex
+        2. Go to Performance › Disk
+        3. Plug in a USB drive
+        4. …
+    validations:
+      required: true
+  - type: dropdown
+    id: how-often
+    attributes:
+      label: How often
+      options:
+        - Every time
+        - Sometimes
+        - Once
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: Screenshots, crash report or anything else
+      description: |
+        Screenshots help a lot (hide anything personal first). If Apex crashed, macOS shows a report: click Report… and paste the first ~60 lines here.
+  - type: checkboxes
+    id: helper
+    attributes:
+      label: Helper
+      options:
+        - label: The battery and fan helper is installed (you turned on a charge limit, schedules, night charging or lid-closed Stay Awake)

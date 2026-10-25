@@ -4,51 +4,88 @@
 
 # Apex Activity Manager
 
-**See what your Mac is doing, understand why, and fix it.**
+### One app for everything your Mac is doing.
 
-A native macOS activity manager by **CyberNet Labs**, designed and built by
-[**sudo-user**](https://github.com/sudo-user101): live performance,
-diagnostics that explain themselves, drive and storage tools, and battery
-control, in one light app that stops working when you're not looking at it.
+See what's happening, understand why, and fix it: processes, performance,
+storage, drives, battery and network in one light, native app.
+By **CyberNet Labs**, designed and built by [**sudo-user**](https://github.com/sudo-user101).
+
+<a href="https://github.com/sudo-user101/Apex-Activity-Manager/releases/latest"><img src="https://img.shields.io/badge/Download%20latest-for%20macOS-0A84FF?style=for-the-badge&logo=apple&logoColor=white" height="44" alt="Download the latest Apex Activity Manager for macOS" /></a>
 
 ![Platform](https://img.shields.io/badge/platform-macOS%2014%2B-000000?logo=apple&logoColor=white)
 ![Swift](https://img.shields.io/badge/Swift-SwiftUI%20%2B%20AppKit-F05138?logo=swift&logoColor=white)
 ![Apple silicon + Intel](https://img.shields.io/badge/universal-Apple%20silicon%20%2B%20Intel-555)
 ![License](https://img.shields.io/badge/license-PolyForm%20Strict-blue)
 
-[**Download for macOS**](https://github.com/sudo-user101/Apex-Activity-Manager/releases/latest) · [Features](#features) · [Install](#install) · [FAQ](#faq)
+[Why Apex](#why-apex) · [Common problems](#common-problems-apex-solves) · [All features](#all-features) · [Install](#install) · [FAQ](#faq) · [License](#license)
 
 </div>
 
+## See it in action
+
 <p align="center">
-  <img src="docs/images/memory.png" alt="Apex Performance page showing Memory: RAM used and memory pressure over time, the full memory breakdown, swap and the processes using the most memory" />
+  <img src="docs/images/overview.png" alt="Apex Activity Manager's main window: the Performance page with live CPU, memory, disk, network and GPU graphs in the sidebar and the Memory page open" />
 </p>
 
-## Highlights
+<p align="center">
+  <img src="docs/images/demo.gif" width="80%" alt="A short demo: Apex shows an app using a lot of memory, Free Up Memory optimizes it, and memory pressure drops back to Normal" />
+</p>
 
-- **Everything in one window.** Processes, CPU, memory, disks, network, GPU,
-  energy, sensors, startup items, users and services, one click apart.
-- **Explains, then helps.** Alerts and diagnostics say what happened, why it
-  matters and what to do, with the evidence behind them.
-- **Drive toolkit.** Drive Doctor, storage clean-up for every drive, live
-  file-transfer control and a guided bootable USB creator.
-- **Battery care.** Charge limit, scheduled and overnight charging that keep
-  working even when Apex is closed.
-- **Light by design.** Native Swift, under 10 MB, no tools spawned every
+## Why Apex
+
+- **One app instead of several.** A system monitor, memory and disk
+  clean-up, a drive checker, battery charge control, a bootable USB maker,
+  a file shelf and more, in one window and one menu bar icon.
+- **Explains, not just measures.** Alerts and diagnostics say what happened,
+  why it matters and what to do, with the evidence behind them, not a wall
+  of numbers.
+- **Honest data.** Every number comes from macOS itself
+  ([where each one comes from](docs/DATA-SOURCES.md)). When macOS doesn't
+  expose something, Apex says so instead of guessing.
+- **Lightweight.** Native Swift, under 10 MB, no tools spawned every
   second, and sampling pauses completely when the window is hidden.
-- **Fast clean-up.** Storage scans measure folders in parallel across every
-  CPU core, so Clean and Analyze fill in quickly even on large libraries.
-- **Cloud Disks.** What's on this Mac and what's only in the cloud, for
-  iCloud Drive, OneDrive, Google Drive, Dropbox, Nextcloud and more, with
-  uploads you can watch, pause and resume.
-- **A shelf for your files.** Drag a file and a shelf appears; keep files
-  there, compress them, or tuck them into a category for later.
-- **Record for later.** Save everything Apex measures to a file you can hand
-  to an AI to find out what was slowing the Mac down.
-- **Honest numbers.** When macOS doesn't expose something, Apex says so
-  instead of guessing.
+- **Private.** No account and no analytics
+  ([what Apex looks up online](#faq)).
 
-## Features
+## Common problems Apex solves
+
+**"Why is my Mac so slow?"**
+Open **Processes** to see which app is using the CPU, memory, disk or GPU,
+and the **Memory** page for memory pressure (Normal / Elevated / Critical)
+and swap. **Free Up Memory** optimizes or quits the heaviest apps and puts
+them back later; **History** shows what was busy when it slowed down.
+
+**"Why is my fan so loud?"**
+**Sensors** shows CPU, GPU, chip and storage temperatures, and fan speeds on
+Macs that have fans; the **CPU** page shows which processes are working the
+processor hardest, and **Optimize** keeps an app running at background
+priority on the efficiency cores, so it gives way to everything else.
+Alerts tell you when the Mac is running hot.
+
+**"My battery health keeps dropping."**
+**Energy** shows health against the design capacity, cycle count, per-app
+power use and a 12-hour charge history. Set a **charge limit** (50–100 %),
+weekly **schedules**, or **night charging** so the battery doesn't sit at
+100 % all day.
+
+**"Why is my external drive so slow?"**
+Each drive's page shows live reads and writes and the USB standard it's
+actually running at, with a warning when a fast drive is stuck on a slow
+port. **Drive Doctor** turns the drive's health data into findings with
+steps to fix them, and **Check for Errors** runs macOS First Aid.
+
+**"Which app is using my internet?"**
+**Network** lists per-app traffic and every connection with its remote
+host; double-click an app for its last 10 minutes of traffic and every
+server it talked to. **Network Doctor** and a speed test help when the
+connection itself is the problem.
+
+**"My disk is almost full."**
+**Storage › Analyze** shows what takes the space folder by folder, and
+**Clean** lists caches, logs, leftovers of deleted apps, old installers,
+build folders and the Trash for review. Nothing is deleted without your say.
+
+## All features
 
 ### Performance at a glance
 
@@ -61,6 +98,10 @@ advanced graph with exact values on hover.
   compressed, cache, free, swap and how fast it's moving, RAM type and speed.
 - **GPU:** utilisation, rendering and geometry load, memory, temperature,
   GPU restarts and the processes using the GPU, including local AI models.
+
+<p align="center">
+  <img src="docs/images/memory.png" alt="Apex Performance page showing Memory: RAM used and memory pressure over time, the full memory breakdown, swap and the processes using the most memory" />
+</p>
 
 <p align="center">
   <img src="docs/images/cpu.png" width="49%" alt="CPU page with per-core graphs" />
@@ -209,13 +250,20 @@ verification afterwards.
 
 ## Install
 
-1. Download **Apex Activity Manager 1.2.0.dmg** from
+1. Download the latest **.dmg** from
    [Releases](https://github.com/sudo-user101/Apex-Activity-Manager/releases/latest).
 2. Open it and drag **Apex Activity Manager** onto **Applications**.
-3. The first time, macOS may say it can't check the app (it isn't notarized
-   yet): open **System Settings › Privacy & Security** and click **Open Anyway**.
+3. Version 1.2.0 isn't notarized: the first time, macOS may say it can't check
+   the app. Open **System Settings › Privacy & Security** and click
+   **Open Anyway**. Releases signed with Developer ID and notarized by Apple
+   open normally.
 
-**Requirements:** macOS 14 Sonoma or later, Apple silicon or Intel.
+### Requirements
+
+- macOS 14 Sonoma or later
+- Apple silicon or Intel
+- About 10 MB of disk space
+- Your password only for the actions that need it ([which ones](SECURITY.md#when-apex-asks-for-your-password))
 
 ## FAQ
 
@@ -230,9 +278,11 @@ next to nothing when hidden, and it hands memory back to macOS when idle.
 
 **Is anything sent over the internet?**
 No. Apex has no analytics and no account. It only looks up what you see on
-screen (your router's name, host names of connections) and talks to local AI
-runtimes on your own Mac. "Check on VirusTotal" opens your browser with the
-file's fingerprint, only when you click it.
+screen: your router's name, host names of connections, your public IP while
+a Network page is open, and the speed test when you run it; and it talks to
+local AI runtimes on your own Mac. "Check on VirusTotal" opens your browser
+with the file's fingerprint, only when you click it. Details in the
+[security policy](SECURITY.md#network-and-privacy).
 
 **Why can't Apex switch off an accessory's power or show GPU watts?**
 macOS doesn't let apps do the first, and only reports the second to
@@ -246,7 +296,9 @@ administrator tools. Apex tells you rather than showing made-up numbers.
 swift test                       # unit tests
 ```
 
-Needs Xcode or the Command Line Tools (Swift 5.10+).
+Needs Xcode or the Command Line Tools (Swift 5.10+). Signed, notarized builds:
+`./build.sh --universal --dmg --notarize` with your own Developer ID; see
+[Releasing](docs/RELEASING.md).
 
 | Path | What's there |
 |---|---|
@@ -261,7 +313,7 @@ Needs Xcode or the Command Line Tools (Swift 5.10+).
 | `Sources/ApexFanHelper` | The privileged helper (installed only when you turn on charge or fan control) |
 | `Tests/TaskManagerTests` | Unit tests |
 
-More: [Architecture](docs/ARCHITECTURE.md) · [Where every number comes from](docs/DATA-SOURCES.md) · [AI diagnostics design](docs/AI-DIAGNOSTICS.md) · [Changelog](CHANGELOG.md)
+More: [Architecture](docs/ARCHITECTURE.md) · [Releasing](docs/RELEASING.md) · [Where every number comes from](docs/DATA-SOURCES.md) · [AI diagnostics design](docs/AI-DIAGNOSTICS.md) · [Changelog](CHANGELOG.md)
 
 ## Roadmap
 
@@ -274,10 +326,27 @@ See the [open issues](https://github.com/sudo-user101/Apex-Activity-Manager/issu
 
 ## License
 
-Source-available under the [PolyForm Strict License 1.0.0](LICENSE): you may
-read, build and use Apex for personal and other noncommercial purposes, but
-not modify, redistribute or use it commercially. For other uses, contact
-CyberNet Labs through the repository's issues.
+**In plain English:** Apex is **free for personal use**. You can download,
+install and use it at no cost, and read and build its source code, for
+personal and other noncommercial purposes (hobby projects, study,
+research, charities, schools).
+
+- ✅ Use it, for free, for anything noncommercial
+- ✅ Read the source and build it yourself
+- ❌ Modify it or make new works based on it
+- ❌ Share or redistribute copies (point people to this page instead)
+- ❌ Use it commercially without a separate license
+
+For commercial use, open an issue to contact CyberNet Labs.
+
+The formal terms are the [PolyForm Strict License 1.0.0](LICENSE); if this
+summary and the license ever differ, the license applies.
+
+## Help and feedback
+
+- [Report a bug or suggest a feature](https://github.com/sudo-user101/Apex-Activity-Manager/issues/new/choose)
+- [Security policy](SECURITY.md): what the helper does and how to report a vulnerability
+- [Contributing](CONTRIBUTING.md)
 
 ## Credits
 

@@ -1,0 +1,50 @@
+# Publishes the website in site/ to GitHub Pages, with the screenshots from
+# docs/images and the app icon copied in (one copy of each image).
+# Turn on once: Settings › Pages › Build and deployment › Source: GitHub Actions.
+name: Website
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - "docs/images/**"
+      - "Resources/apex_icon.png"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    # GitHub Pages needs a public repository on the free plan.
+    if: ${{ !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assemble the site
+        run: |
+          mkdir -p _site/images
+          cp -R site/. _site/
+          cp docs/images/*.png _site/images/
+          cp docs/images/*.gif _site/images/ 2>/dev/null || true
+          cp Resources/apex_icon.png _site/images/apex_icon.png
+          touch _site/.nojekyll
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4
