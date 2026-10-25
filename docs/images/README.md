@@ -1,22 +1,21 @@
 # Screenshots
 
-Images used by the README and the website (`site/`). Capture with the
-window at its default size, in Dark Mode, with nothing personal on screen
-(no real names, addresses, Wi-Fi names or file names you'd rather not share).
+Images used by the README and the website (`site/`). Taken on macOS 15 in
+Dark Mode at the window's default size, without the window shadow.
 
-**Window shots:** ⌘⇧4, then Space, then click the window (macOS adds the
-shadow). **GIF:** record with ⌘⇧5 › Record Selected Portion, then convert
-the .mov to a GIF under about 8 MB (for example 800 px wide, 12–15 fps).
+**Privacy:** every image is checked before it's added. Anything personal is
+blurred: the computer and user name, IP and hardware addresses, host names,
+email addresses, volume names, and other apps' names where they'd distract.
+The check uses macOS's text recognition to find them and a final pass to
+confirm none can still be read.
 
-## Still to capture
-
-| File | What to show | Alt text (already in the README) |
-|---|---|---|
-| `overview.png` | The main window on **Performance › Memory**, sidebar graphs all moving, a few apps open so the lists aren't empty | Apex Activity Manager's main window: the Performance page with live CPU, memory, disk, network and GPU graphs in the sidebar and the Memory page open |
-| `demo.gif` | 10–15 seconds: an app using a lot of memory, **Free Up Memory**, Optimize it, memory pressure going back to Normal | A short demo: Apex shows an app using a lot of memory, Free Up Memory optimizes it, and memory pressure drops back to Normal |
-
-## Already here
-
-`memory.png`, `cpu.png`, `gpu.png`, `processes.png`, `free-up-memory.png`,
-`network.png`, `drive.png`, `drive-doctor.png`, `storage.png`,
-`bootable-media-creator.png`, `energy.png`, `history.png`, `startup.png`.
+| File | What it shows |
+|---|---|
+| `overview.png` | Performance › Memory: the main window with every resource in the sidebar |
+| `demo.gif` | The Memory page updating live (12 seconds) |
+| `cpu.png`, `gpu.png`, `network.png`, `energy.png` | Those Performance pages |
+| `processes.png` | Processes, apps grouped with their helpers |
+| `free-up-memory.png`, `storage.png`, `drive-doctor.png` | Those sheets on their own |
+| `history.png` | History › Events |
+| `startup.png` | Startup |
+| `drive.png`, `bootable-media-creator.png` | A USB drive's page and the Bootable Media Creator (retake with a USB drive plugged in) |

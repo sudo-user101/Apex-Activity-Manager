@@ -28,7 +28,7 @@ By **CyberNet Labs**, designed and built by [**sudo-user**](https://github.com/s
 </p>
 
 <p align="center">
-  <img src="docs/images/demo.gif" width="80%" alt="A short demo: Apex shows an app using a lot of memory, Free Up Memory optimizes it, and memory pressure drops back to Normal" />
+  <img src="docs/images/demo.gif" width="80%" alt="Apex's Memory page updating live: RAM used and memory pressure over the last minute, the memory breakdown, swap and the processes using the most memory" />
 </p>
 
 ## Why Apex
@@ -98,10 +98,6 @@ advanced graph with exact values on hover.
   compressed, cache, free, swap and how fast it's moving, RAM type and speed.
 - **GPU:** utilisation, rendering and geometry load, memory, temperature,
   GPU restarts and the processes using the GPU, including local AI models.
-
-<p align="center">
-  <img src="docs/images/memory.png" alt="Apex Performance page showing Memory: RAM used and memory pressure over time, the full memory breakdown, swap and the processes using the most memory" />
-</p>
 
 <p align="center">
   <img src="docs/images/cpu.png" width="49%" alt="CPU page with per-core graphs" />
