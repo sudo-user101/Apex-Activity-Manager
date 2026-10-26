@@ -317,11 +317,31 @@ Needs Xcode or the Command Line Tools (Swift 5.10+). Signed, notarized builds:
 
 More: [Architecture](docs/ARCHITECTURE.md) · [Releasing](docs/RELEASING.md) · [Where every number comes from](docs/DATA-SOURCES.md) · [AI diagnostics design](docs/AI-DIAGNOSTICS.md) · [Changelog](CHANGELOG.md)
 
+## Every computer
+
+Apex's direction is simple: **if it's a computer, it can run Apex.** One app,
+the same pages and the same plain words on every operating system and every
+kind of hardware:
+
+- **macOS:** Apple silicon and Intel.
+- **Windows:** x64 and ARM64 PCs.
+- **Linux:** desktops and servers, x86_64 and ARM (64- and 32-bit), the main
+  distributions and the small ones.
+- More to come, as they're tested: older versions of each system, and other
+  operating systems.
+
+Some features depend on what each system allows (fan control or battery
+charge limits, for example), so an edition may have fewer of them. When it
+does, the app says so plainly instead of hiding the page. Install should
+never be the thing that stops you.
+
 ## Roadmap
 
 See the [open issues](https://github.com/sudo-user101/Apex-Activity-Manager/issues) for what's being worked on next.
 
-- A native **Windows** edition.
+- The **Windows** edition ([Apex for Windows](https://github.com/sudo-user101/Apex-Activity-Manager-for-Windows))
+  reaching everything this one does, and a **Linux desktop** edition.
+- Apex on **every computer** (above).
 - AI-assisted explanations: your own API key, a local model, or an Apex
   subscription ([design](docs/AI-DIAGNOSTICS.md)).
 - A Developer ID-signed, notarized release.
