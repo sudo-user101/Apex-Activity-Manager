@@ -24,7 +24,8 @@ This is how macOS itself counts memory.
 | **Available** | Physical memory − Memory used | What apps could get without macOS having to swap (free plus cache) |
 | **Swap used** | `sysctlbyname("vm.swapusage")` → `xsu_used` / `xsu_total` | Memory moved to the disk because RAM ran out. macOS adds swap files as needed, so the total grows |
 | Swap in / out speed | Change in `swapins` / `swapouts` (pages) × page ÷ seconds | How fast memory is moving between RAM and disk right now |
-| **Memory pressure %** | 100 − `kern.memorystatus_level` | macOS's own pressure signal |
+| **Memory pressure** (state) | `kern.memorystatus_vm_pressure_level`: 1 Normal, 2 Elevated, 4 Critical | macOS's own state, the one it acts on; the headline on the Memory page |
+| **Pressure score %** | 100 − `kern.memorystatus_level` | The kernel's memory level, shown as "Score … from the kernel"; not RAM used |
 | Pressure colour / level | `kern.memorystatus_vm_pressure_level`: 1 Normal (green), 2 Elevated (yellow), 4 Critical (red) | The kernel's own verdict; Apex never calls yellow "high" |
 | RAM type / speed / maker | `system_profiler SPMemoryDataType -json`; on Apple Silicon the speed isn't reported, so the chip's **spec-sheet** value is shown and labelled as such | |
 | Memory graph series | Each panel row's value as % of physical memory, one point per sample, 10 minutes kept | |
@@ -279,11 +280,25 @@ capacity, whole-disk write speed. See `docs/PROJECT.md` for the rules.
 | Keep awake / chosen days | `KeepAwake` power assertions (lid open); days in `awakeDays` (weekday numbers), checked every 30 s |
 | Lid-closed mode | Apex: on when enabled, a chosen app (bundle id) is running and the Mac is on power (`IOPSGetProvidingPowerSourceType`), or on battery if allowed and for at most `lidAwakeBatteryMinutes` (≤ 60) since unplugging. Apex writes `stayAwakeUntil` = now + 3 min to the helper's settings every 30 s. Helper (root): `pmset -a disablesleep 1` while `stayAwakeUntil` is in the future and at most 10 min ahead, else `0`; marker file `/Library/Application Support/Apex/sleep-disabled-by-apex` so a killed helper undoes it on start, and a pmset setting the user made is never touched |
 
+## Removing an app: what belongs to it
+
+| Value | Source |
+|---|---|
+| Data and settings | `~/Library` places (Application Support, Caches, Preferences, Containers, Group Containers, Saved Application State, HTTPStorages, WebKit, Logs, LaunchAgents, Cookies, Application Scripts, ByHost): names equal to the bundle ID or starting with it, group containers ending with it, the app's exact name or file name, and `<company>/<app>` folders (company = 2nd part of the bundle ID) |
+| System files and helpers | `/Library/LaunchDaemons` and `/Library/LaunchAgents` plists named by the bundle ID or whose `Program` / `ProgramArguments[0]` is inside the app; `/Library/PrivilegedHelperTools` by bundle ID; `/Library` Application Support / Caches / Preferences / Logs by the same rules. Removed with one admin prompt: daemons `launchctl bootout`, files `mv` to your Trash with the time added |
+| Installer records | `pkgutil --pkgs` ids matching the bundle ID; `pkgutil --forget` (admin) |
+| Saved sign-ins | Login keychain generic and internet passwords (`SecItemCopyMatching`, attributes only, never passwords): service, server or label equal to / starting with the bundle ID, or starting with the app's name as whole words ("Chrome Safe Storage"); removed with `SecItemDelete` |
+| Files made with it | Content types the app owns (`CFBundleDocumentTypes` with `LSHandlerRank` Owner) or declares (`UTExportedTypeDeclarations`), not public.* / com.apple.*; `mdfind -onlyin ~` outside ~/Library, up to 300. Needs Full Disk Access to see Documents and Desktop |
+| Running | Every process whose path is inside the app bundle (helpers too); Quit It terminates the app, then SIGTERM to helpers left |
+| Who made it | Code signature team ID (`SecCodeCopySigningInformation`) |
+
 ## Shelf: details and compare
 
 | Value | Source |
 |---|---|
-| Photo details | ImageIO properties: pixel size, colour model / depth, profile, dpi; TIFF make / model / software; Exif lens, f-number, exposure, ISO, focal length, date taken, comment; GPS latitude / longitude |
+| Photo details | ImageIO properties: pixel size, megapixels, colour model / depth, profile, dpi, alpha (Transparency), orientation; TIFF make / model / software; Exif lens, f-number, exposure, ISO, focal length, flash, white balance, date taken, comment; GPS latitude / longitude; HDR = an HDR gain map (`CGImageSourceCopyAuxiliaryDataInfoAtIndex`, `kCGImageAuxiliaryDataTypeHDRGainMap`); Frames = `CGImageSourceGetCount` > 1. Data per pixel = file size × 8 ÷ (width × height) |
+| File details | Format (`UTType` description), created / modified (`URLResourceValues`) |
+| Picture quality | Both pictures as ImageIO thumbnails (768 px, orientation applied), drawn at the same size into sRGB RGBA; PSNR over R, G, B (`MediaInfo.psnr`): ≥ 40 dB "Looks the same", 35–40 "Hard to tell apart", 30–35 "Slight change", below "Noticeable change" |
 | Video details | AVFoundation: duration, first video track's natural size, frame rate, estimated data rate, codec (format description); common metadata make / model / creation date / location / software |
 | PDF details | PDFKit page count, author, creator |
 | Remove Details | Photos: `CGImageDestinationCopyImageSource` with an empty metadata set (orientation kept), XMP and GPS excluded: the image data is copied, not re-encoded. Videos: `AVAssetExportPresetPassthrough`, `metadata = []`, `.forSharing()` filter |
@@ -293,6 +308,10 @@ capacity, whole-disk write speed. See `docs/PROJECT.md` for the rules.
 
 | Value | Source |
 |---|---|
+| Names | `ShelfSet.displayName`: the name given (categories; side and menu bar shelves can be named), else the first file's name without extension, "+ N more" |
+| Category look | `icon` (SF Symbol from `ShelfLook.symbols`) and `color` (`ShelfLook.colors`), saved in categories.json |
+| In the menu bar | `pinned` categories each get an `NSStatusItem` (`PinnedShelves`): the symbol in its colour (template image without a colour); click shows the category in a popover; files dropped on the icon are taken by the status item's window (`registerForDraggedTypes([.fileURL])`, window delegate as the dragging destination) and added to the category |
+| Limits | None in the code: every recent shelf and shelf to the side is kept |
 | Side shelves | `ShelfStore.side` (newest first, up to 10), saved in `Shelf/side.json` |
 | Categories | `ShelfStore.categories` (named), saved in `Shelf/categories.json`; adding merges by file path (no file twice); a new category with an existing name (any case) adds to that one |
 | What's open | `ShelfStore.open`: the current shelf, a side shelf or a category; the floating shelf and the menu bar Shelf tab show it |
@@ -310,6 +329,61 @@ capacity, whole-disk write speed. See `docs/PROJECT.md` for the rules.
 | Finder aliases | Followed to the original (`URL(resolvingAliasFileAt:)`) when added and when old shelves load, so the shelf shows and compresses the real file |
 | Output | "Name (compressed).heic" / "(converted)" next to the original (or in Downloads if that folder can't be written), never overwriting; the original is never changed |
 | Thumbnails | `QLThumbnailGenerator` (the file's Quick Look preview) |
+
+## Cloud Disks: the service's app
+
+| Value | Source |
+|---|---|
+| Signed out | A waiting file's `ubiquitousItemUploadingError` is `NSFileProviderErrorDomain` -1000 (not authenticated) → the whole service |
+| Not open | Services synced by their own app (detected in ~/Library/CloudStorage, not iCloud): no running process inside `<Name>.app` (`CloudUpload.processes`) while files wait |
+| Open button | `/Applications/<Name>.app` or `~/Applications/<Name>.app` |
+
+## Census
+
+| Value | Source |
+|---|---|
+| Right Now | The live process sample (`AppModel.snapshot.processes`), summed per app (`appKey`: outer .app bundle, else name): CPU %, memory (resident), disk read + write rate, network rate, GPU %, power (W). Network and GPU per process are sampled while Census is open. Top 6 per resource above a floor (0.5 % CPU / GPU, 1 KB/s, 0.05 W) |
+| Today | App History's totals for today (`HistoryStore.totals(days: 1)`): CPU time, peak memory, disk and network bytes, energy (J → Wh). No GPU |
+| Marked | In the top 3 of two or more resources (`Census.heavy`) |
+
+## Servers and containers
+
+**Apex Server Edition** (on the server, as root, every 2 s while someone is
+looking, every 15 s otherwise): `/proc/stat`, `/proc/meminfo`, `/proc/loadavg`,
+`/proc/net/dev`, `/proc/net/tcp{,6}` (established), `/proc/diskstats` +
+`/proc/self/mountinfo` + statfs (real file systems, one per device),
+`/proc/<pid>/{stat,status,cmdline,io}` for every process, `/etc/passwd`,
+`/sys/class/hwmon` (temperatures), `nvidia-smi` / `/sys/class/drm` (GPUs),
+`systemctl list-units` / `rc-status` / `service --status-all` (services, every
+5 s), the Docker or Podman socket (`/containers/json`, `/stats`), `/run/utmp`
+or `loginctl` (signed in). Served as the same JSON the SSH script prints, over
+HTTPS on port 7443. Actions: `kill`, `systemctl` / `rc-service` / `service`,
+Docker's `/containers/<id>/<verb>`.
+
+Chosen in Performance › **This Mac** menu (All Servers, This Mac, Docker
+Containers, each server and running container, Add Server…). Processes,
+Performance, Services and Users then show that server or container; Assistant,
+History and Startup stay this Mac's. Apex always opens on this Mac.
+
+| Value | Source |
+|---|---|
+| Connection | `/usr/bin/ssh` with `BatchMode=yes` (keys only, never a password), `ConnectTimeout=8`, `StrictHostKeyChecking=accept-new`; your `~/.ssh/config` applies. One shared connection (socket in `~/Library/Caches/Apex/ssh`, kept 60 s after last use) started on its own with `-f -N` and no pipes (`ServerClient.openShared`); each reading uses it with `ControlMaster=no`. (Started by a reading with `ControlMaster=auto`, the background connection held the reading's output open and each reading waited ~60 s) |
+| Readings | `Resources/apex-agent.py` (Python 3.6 or later; leaves out itself and its own `ps`; disks: real devices + a container's overlay root, not mounted files), sent on stdin to `python3 -` (or `docker exec -i <container> python3 -`) each refresh, every 3 s while the page shows: `/proc/stat` (CPU, two readings 1 s apart), `/proc/meminfo`, `/proc/loadavg`, `/proc/net/dev`, `/proc/diskstats` + `df`, `ps` (up to 500, busiest first), `nvidia-smi`, `docker ps -a` + `docker stats`, `systemctl list-units --type=service --all` (every service: state, description) and `--state=failed`, `who` (signed-in users), `ss` (established connections), web servers by process name. Refreshed every 3 s while a server is shown (whichever page), every 5 s for All Servers |
+| Containers on this Mac | The `docker` command line tool (Homebrew, Docker Desktop, OrbStack paths; its current context, e.g. Colima): `docker ps -a` + `docker stats --no-stream` (list, every 5 s on Docker Containers); for one container every 3 s: `docker stats` (CPU as a share of Docker's CPUs from `docker info` NCPU, memory used / limit, network and block I/O → rates from the previous reading), `docker inspect` (image, started), the container's own `ps` via `docker exec` (its own process ids, so End works; Apex's `ps` left out) or `docker top` when it has none (shown, not ended), `docker exec … df -kP /` (size; "not available" without df) |
+| Users (server) | Processes grouped by user (count, CPU, memory) + `who` sessions (terminal, from where); signed-in users first |
+| Actions | Confirmed first. Over the same SSH: `docker start / stop / restart`, `kill` / `kill -9` (inside the container with `docker exec` when watching one), `sudo -n systemctl start / stop / restart` (only where sudo needs no password). For a container on this Mac only `docker …` commands run (`LocalDocker.action` refuses anything else) |
+| Report | `ServerReports`: every saved server and running container read once a minute while Apex is open (`ServerStore.startReports`; ones read in the last 50 s are skipped), plus every reading while one is on screen. Each minute: average and peak CPU and memory, fullest disk (% used, mount), average network in / out, up-time, failed services, 5 busiest processes by CPU; a minute with no answer is marked down. 24 hours in `~/Library/Application Support/Apex Activity Manager/server-reports.json` (every 5 min and on quit). `ReportSummary`: averages and peaks over the range; events: CPU or memory ≥ 90 % for 5+ minutes in a row (a gap over 2 minutes ends a stretch), minutes unreachable, restarted (up-time over 2 minutes behind where it should be), fullest disk ≥ 90 %, failed services; received / sent = average rate × 60 per minute; busiest = time among the top 3 × average CPU |
+| Insights | `ServerInsights`: load > 1.5 × cores, available memory < 15 % / 5 %, swap > 50 %, disks ≥ 85 % / 95 %, days until full from growth (one point a minute, needs ≥ 10 min), failed services, containers exited with an error |
+
+## Shell
+
+| Value | Source |
+|---|---|
+| Commands | `ShellCatalog` (built in); blanks filled with `Shell.quote` (single-quoted, so typed text is only ever a value) |
+| Running | `/bin/zsh -lc` (your PATH, like Terminal), output streamed from a pipe; admin commands and `sudo …` lines via `osascript … with administrator privileges`; output kept to the last ~200 KB |
+| History | The command line's last 100 commands, in Apex's settings (`shellHistory`) |
+| Network services | `networksetup -listallnetworkservices` |
+| Interactive programs | top, ssh, editors, pagers, bare `sudo`, REPLs → Terminal via AppleScript `do script` |
 
 ## Record
 
@@ -391,26 +465,43 @@ capacity, whole-disk write speed. See `docs/PROJECT.md` for the rules.
 | Make Online-Only | `FileManager.evictUbiquitousItem` on the chosen files (the largest stored here, over 1 MB) |
 | Offload All | Every file with storage on this Mac (`storedFiles`), `evictUbiquitousItem` in chunks of 50; on failure `ubiquitousItemIsUploaded` = false → retried every 60 s (10 rounds), `ubiquitousItemUploadingError` → reported; a notification (`Alerts.notify`) at the end |
 
-## Assistant (Local AI)
+## Assistant: Local AI
 
 | Value | Source |
 |---|---|
-| Server | First of LM Studio (`http://127.0.0.1:1234/v1`) and Ollama (`http://127.0.0.1:11434/v1`) whose `/models` answers within 1.5 s |
+| Server | First of LM Studio (`http://127.0.0.1:1234/v1`) and Ollama (`http://127.0.0.1:11434/v1`) whose `/models` answers within 1.5 s, looked for when the Local AI mode opens |
 | Models | `/v1/models` ids, embedding models left out; the choice is kept (`assistantModel`) |
-| Answers | `/v1/chat/completions` with `stream: true` (server-sent events), temperature 0.3, last 12 messages |
-| Context | Each question carries Apex's live readings as plain text (`AssistantContext.build`): Mac, CPU, memory and pressure, swap, startup disk, network, GPU, battery, five busiest and largest apps, five latest alerts. Nothing leaves the Mac |
-| Scope | System instructions: this Mac and its system utilities only; plain words; steps in order; Apex pages to use; no risky commands without warning |
+| Answers | `/v1/chat/completions`, `stream: true`, temperature 0.3, last 12 messages, the same instructions as Claude with the readings (if on) in the system message. Nothing leaves the Mac |
+| Models on this Mac | The former Local AI page (runtimes by process, their local APIs, installed models on disk), now a sheet from the Models button |
 | Start LM Studio's Server | `~/.lmstudio/bin/lms server start`, only when the user presses the button |
+
+## Assistant: Apex Agent
+
+| Value | Source |
+|---|---|
+| Questions | `ApexAgent.topics`: 22 topics (slow, storage, battery drain and health, heat, Wi-Fi, frozen apps, kernel_task, WindowServer, memory, login items, sleep, eject, Bluetooth, malware, background jobs, backup, updates, restart, disk health, what's using it, Apex itself). The question is lower-cased, punctuation removed, everyday words evened out ("laggy" → slow, "ram" → memory); each topic's words and phrases add up; 2 or more wins, otherwise "Please try Lumen AI" |
+| Readings | `ApexAgent.Readings.current()`: Apex's latest sample (busiest and largest apps without Apex itself, memory pressure, swap, startup disk, battery, CPU temperature, network, kernel_task and WindowServer CPU). Nothing leaves the Mac |
+| Buttons | Free Up Memory, Disk › Clean, a Performance page (`perfItem`), or a section |
+| Commands | `ApexAgent.command`: a quit word (quit, close, exit, kill, end, stop, terminate, shut, force) not at the start of a question; "all / everything / apps…" = every open app (`NSWorkspace.runningApplications`, regular, not Finder or Apex) minus any named after "except / but / besides…"; otherwise apps named by their full name or any distinctive word. "process(es)": your own non-app processes (same user, not in /System or /usr/libexec, not Dock, WindowServer…). Nothing happens until the button: `terminate()` (apps ask to save) or `forceTerminate()` when "force" was said; processes `SIGTERM`, only if still yours |
+
+## Assistant (Claude)
+
+| Value | Source |
+|---|---|
+| Service | Anthropic Messages API, `POST https://api.anthropic.com/v1/messages`, `anthropic-version: 2026-10-21`, the user's API key (`x-api-key`) from the login Keychain (service "Apex Activity Manager", account `anthropic-api-key`) |
+| Key check | `GET /v1/models?limit=1` when the key is entered (costs nothing); 401 → "didn't accept this API key" |
+| Models | Claude Opus 5.5 (default), Sonnet 5.5, Haiku 5.5; the choice is kept (`assistantCloudModel`) |
+| Answers | `stream: true` (server-sent events), `max_tokens` 16000, adaptive thinking with summarized display (the "Thinking" line), effort medium, prompt caching on, no sampling settings (removed in 2026-10-21). Opus/Sonnet: `fallbacks: "default"` with beta `server-side-fallback-2026-07-01`, so a declined question is retried on Anthropic's recommended model |
+| History | Every turn is sent back unchanged (thinking blocks and signatures included, citations stripped from text); a turn that fails or is stopped is removed with its question, which goes back into the box. New Chat clears it |
+| Context | With readings on (the gauge button, `assistantReadings`), each question carries Apex's live readings as plain text before it (`AssistantContext.build`): Mac, CPU, memory and pressure, swap, startup disk, network, GPU, battery, five busiest and largest apps (names), five latest alerts. No files or passwords. This leaves the Mac, and the UI says so |
+| Errors | Error types → plain words (key, billing, rate limit, overloaded, too long); `stop_reason` refusal / max_tokens → a short note |
+| Scope | System instructions: this Mac; plain words; short; steps in order; Apex pages to use; no risky commands without warning |
+
+## Cloud services (catalogue and totals)
+
+| Value | Source |
+|---|---|
 | Catalogue | `CloudCatalog.providers`: Google (Drive, Gmail, Photos), OneDrive, iCloud, Dropbox, Box, MEGA, pCloud, Proton Drive, Sync.com, Tresorit, IDrive, Icedrive, Koofr, Yandex Disk, Jottacloud, Filen, TeraBox, Nextcloud, ownCloud, Seafile, Synology; each with its storage page, WebDAV address and Mac app folder where they exist; "Other provider" by address |
 | Total storage (web sign-in) | The provider's storage page in a WKWebView with its own persistent `WKWebsiteDataStore(forIdentifier:)` per service; page text (`document.body.innerText`) every 2 s, `CloudCatalog.parseUsage` finds "X unit (used) of Y unit" (of, /, out of, von, de…; decimal commas; largest total wins). Saved with the time (`cloudWebQuota`), re-read in a hidden web view every 6 h or on ↻. If the provider redesigns its page, the line may not be found: Apex says to sign in again |
 | Added folders | Total and free space of the disk they're on (`volumeTotalCapacity`, `volumeAvailableCapacityForImportantUsage`) |
 
-## Permissions (welcome flow, Settings)
-
-| Permission | How Apex knows / asks |
-|---|---|
-| Notifications | `UNUserNotificationCenter` settings; asked directly |
-| Full Disk Access | Can't be asked by apps: opening a protected file (`TCC.db`, Safari bookmarks) or listing `~/Library/Mail` succeeds only with it on; the button opens System Settings › Privacy › Full Disk Access |
-| Bluetooth | `CBManager.authorization`; first Bluetooth use makes macOS ask, else the Privacy › Bluetooth switch is opened |
-| Open at Login | `SMAppService.mainApp` status / `register()` (Login Items approval opened if needed) |
-| Battery and Fan Helper | `FanController.installed`; Install asks for the admin password |

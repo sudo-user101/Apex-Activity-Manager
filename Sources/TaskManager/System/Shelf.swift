@@ -12,6 +12,8 @@ struct ShelfItem: Identifiable, Codable, Hashable, Sendable {
     var original: String? = nil
     var url: URL { URL(fileURLWithPath: path) }
     var name: String { url.lastPathComponent }
+    /// The name without its extension (what Rename edits).
+    var baseName: String { url.deletingPathExtension().lastPathComponent }
     var exists: Bool { FileManager.default.fileExists(atPath: path) }
 }
 
@@ -23,23 +25,60 @@ struct ShelfSet: Identifiable, Codable, Hashable, Sendable {
     var name: String? = nil
     /// Minimized to the menu bar (kept in its Shelf tab) instead of the screen edge.
     var inMenuBar: Bool? = nil
+    /// Categories: the SF Symbol and colour chosen for it, and whether it has
+    /// its own icon in the menu bar.
+    var icon: String? = nil
+    var color: String? = nil
+    var pinned: Bool? = nil
+    var symbol: String { icon ?? "folder.fill" }
+    /// A shelf's name: the one given, or one made from what's on it
+    /// ("Photo 1 + 2 more"). Pure: tested.
+    var displayName: String {
+        if let name, !name.isEmpty { return name }
+        guard let first = items.first else { return "Empty shelf" }
+        let base = first.url.deletingPathExtension().lastPathComponent
+        return items.count == 1 ? base : "\(base) + \(items.count - 1) more"
+    }
     var title: String {
         let f = DateFormatter(); f.dateStyle = .medium; f.timeStyle = .short
         return items.isEmpty ? "Empty shelf" : "\(items.count) \(items.count == 1 ? "item" : "items") · \(f.string(from: created))"
     }
     var count: String { "\(items.count) \(items.count == 1 ? "item" : "items")" }
+
+    /// The icons of what's on it, most common first, for the short chip ("7 · 📷"). Pure: tested.
+    var kindSymbols: [String] { kinds.map(\.symbol) }
+
+    /// What's on it, counted by kind with an icon ("2 screenshots", "1 video",
+    /// "1 PDF", "3 files"), for the short stack chips. Pure: tested.
+    var kinds: [(symbol: String, text: String)] {
+        var n: [Int] = [0, 0, 0, 0, 0]   // screenshots, images, videos, PDFs, files
+        for i in items {
+            switch MediaCompressor.kind(i.url) {
+            case .image:
+                // Screenshots (macOS's own names) and images pasted or dragged in
+                // without a file, which Apex saves as "Image <date>".
+                let name = i.name
+                n[name.hasPrefix("Screenshot") || name.hasPrefix("Screen Shot") || name.hasPrefix("Image 2") ? 0 : 1] += 1
+            case .video: n[2] += 1
+            case .pdf: n[3] += 1
+            case .other: n[4] += 1
+            }
+        }
+        let words = [("camera.viewfinder", "screenshot", "screenshots"), ("photo", "image", "images"), ("film", "video", "videos"),
+                     ("doc.richtext", "PDF", "PDFs"), ("doc", "file", "files")]
+        return zip(n, words).filter { $0.0 > 0 }.map { c, w in (w.0, "\(c) \(c == 1 ? w.1 : w.2)") }
+    }
 }
 
 /// Which shelf the shelf window shows.
 enum ShelfTarget: Hashable, Sendable { case current, side(UUID), category(UUID) }
 
-/// The current shelf and the ones before it (5 in all), shelves put to the
-/// side, and named categories; all saved to disk.
+/// The current shelf and the ones before it, shelves put to the side, and
+/// named categories; all saved to disk. No count limits: as many shelves and
+/// files as the Mac's memory and disk allow.
 @MainActor @Observable
 final class ShelfStore {
     static let shared = ShelfStore()
-    static let keep = 5
-    static let keepSide = 10
 
     private(set) var shelves: [ShelfSet] = []     // [0] is the current shelf
     var current: ShelfSet { shelves.first ?? ShelfSet() }
@@ -49,13 +88,19 @@ final class ShelfStore {
     private(set) var categories: [ShelfSet] = []
     /// The shelf on show (in the floating shelf and the menu bar).
     var open: ShelfTarget = .current
-    var shown: ShelfSet {
-        switch open {
+    var shown: ShelfSet { shelf(open) }
+
+    func shelf(_ target: ShelfTarget) -> ShelfSet {
+        switch target {
         case .current: return current
         case .side(let id): return side.first { $0.id == id } ?? current
         case .category(let id): return categories.first { $0.id == id } ?? current
         }
     }
+
+    /// Where Apex keeps a shelf's own files (pictures, links and text dropped
+    /// without a file, files an app handed over on drop); removed with the shelf.
+    func ownFolder(_ id: UUID) -> URL { folder.appendingPathComponent(id.uuidString, isDirectory: true) }
 
     @ObservationIgnored private let folder: URL
     @ObservationIgnored private var file: URL { folder.appendingPathComponent("shelves.json") }
@@ -89,29 +134,45 @@ final class ShelfStore {
         return target
     }
 
-    func add(_ urls: [URL], original: URL? = nil) {
+    /// Returns how many went on (the rest were already there). Only files:
+    /// a web address is never taken for a path.
+    @discardableResult
+    func add(_ urls: [URL], original: URL? = nil) -> Int {
         var s = shown
-        s.items = Self.merged(urls.map { ShelfItem(path: Self.resolved($0).path, original: original?.path) }, into: s.items)
+        let before = s.items.count
+        s.items = Self.merged(urls.filter(\.isFileURL).map { ShelfItem(path: Self.resolved($0).path, original: original?.path) }, into: s.items)
         replaceShown(s)
+        return s.items.count - before
     }
 
-    /// `new` on top of `old`, without the same file twice. Pure: tested.
+    /// `new` on top of `old`, without the same file twice (the same file
+    /// however its path is written: /var or /private/var, "a/../b"), and
+    /// never twice from one drop. Pure: tested.
     nonisolated static func merged(_ new: [ShelfItem], into old: [ShelfItem]) -> [ShelfItem] {
         var out = old
-        for item in new.reversed() where !out.contains(where: { $0.path == item.path }) { out.insert(item, at: 0) }
+        var have = Set(old.map { canonical($0.path) })
+        for item in new.reversed() where have.insert(canonical(item.path)).inserted { out.insert(item, at: 0) }
         return out
     }
 
-    /// Saves image data (no file behind it) into the shelf folder and adds it.
-    func add(image: NSImage) {
-        guard let tiff = image.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff),
-              let png = rep.representation(using: .png, properties: [:]) else { return }
-        let dir = folder.appendingPathComponent(shown.id.uuidString, isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
-        let url = dir.appendingPathComponent("Image \(f.string(from: Date())).png")
-        guard (try? png.write(to: url)) != nil else { return }
-        add([url])
+    /// One spelling per file. Pure.
+    nonisolated static func canonical(_ path: String) -> String {
+        let u = URL(fileURLWithPath: path).standardizedFileURL
+        // The folder it's in is resolved (it exists even when the file is gone).
+        var dir = u.deletingLastPathComponent().path
+        if let r = realpath(dir, nil) { dir = String(cString: r); free(r) }
+        var out = (dir as NSString).appendingPathComponent(u.lastPathComponent)
+        for p in ["/private/var/", "/private/tmp/", "/private/etc/"] where out.hasPrefix(p) { out = String(out.dropFirst(8)) }
+        return out
+    }
+
+    /// Puts `copy` where the file at `path` was on the shown shelf (same place
+    /// in the order), remembering it was made from that file.
+    func replace(path: String, with copy: URL) {
+        var s = shown
+        guard let i = s.items.firstIndex(where: { $0.path == path }) else { add([copy], original: URL(fileURLWithPath: path)); return }
+        s.items[i] = ShelfItem(path: copy.path, original: path)
+        replaceShown(s)
     }
 
     func remove(_ item: ShelfItem) {
@@ -120,12 +181,63 @@ final class ShelfStore {
         replaceShown(s)
     }
 
+    /// Takes files that were moved or deleted off the shelf on show.
+    func removeMissing() {
+        var s = shown
+        s.items.removeAll { !$0.exists }
+        replaceShown(s)
+    }
+
+    /// Renames the file itself (in its folder) and every shelf entry that
+    /// points at it. `base` is the name without the extension, which stays.
+    @discardableResult
+    func rename(_ item: ShelfItem, to base: String) throws -> URL {
+        let to = try Self.renamed(item.url, base: base)
+        guard to != item.url else { return to }
+        try FileManager.default.moveItem(at: item.url, to: to)
+        let old = item.path, new = to.path
+        func fix(_ set: inout ShelfSet) {
+            for j in set.items.indices {
+                if set.items[j].path == old { set.items[j].path = new }
+                if set.items[j].original == old { set.items[j].original = new }
+            }
+        }
+        for i in shelves.indices { fix(&shelves[i]) }
+        for i in side.indices { fix(&side[i]) }
+        for i in categories.indices { fix(&categories[i]) }
+        save()
+        return to
+    }
+
+    struct RenameError: LocalizedError {
+        let message: String
+        var errorDescription: String? { message }
+    }
+
+    /// The new location for `url` named `base` + its extension. Pure (except
+    /// for checking the name is free): tested.
+    nonisolated static func renamed(_ url: URL, base: String) throws -> URL {
+        let b = base.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !b.isEmpty else { throw RenameError(message: "Type a name first.") }
+        guard !b.contains("/"), !b.contains(":") else { throw RenameError(message: "A name can’t contain “/” or “:”.") }
+        guard !b.hasPrefix(".") else { throw RenameError(message: "A name starting with “.” would hide the file.") }
+        let ext = url.pathExtension
+        let name = ext.isEmpty ? b : b + "." + ext
+        guard name.utf8.count <= 255 else { throw RenameError(message: "That name is too long.") }
+        let to = url.deletingLastPathComponent().appendingPathComponent(name)
+        if to.lastPathComponent == url.lastPathComponent { return url }
+        // Only a change of capital letters is the same file on most Mac disks: allowed.
+        if FileManager.default.fileExists(atPath: to.path), to.path.lowercased() != url.path.lowercased() {
+            throw RenameError(message: "There’s already a file called “\(name)” there.")
+        }
+        return to
+    }
+
     /// Starts an empty shelf; the current one moves to the recent list.
     func newShelf() {
         open = .current
         guard !current.items.isEmpty else { return }
         shelves.insert(ShelfSet(), at: 0)
-        trim()
         save()
     }
 
@@ -142,8 +254,22 @@ final class ShelfStore {
             var s = current
             s.inMenuBar = menuBar ? true : nil
             side.insert(s, at: 0)
-            while side.count > Self.keepSide { side.removeLast() }
             shelves[0] = ShelfSet()
+        }
+        open = .current
+        save()
+    }
+
+    /// After its files were dropped somewhere: the shelf on show goes into the
+    /// menu bar's Shelf tab (or to the side). The current shelf is kept there
+    /// and the next drag starts a new one; a side shelf moves into the menu
+    /// bar; a category stays where it is.
+    func tuckAway(menuBar: Bool) {
+        switch open {
+        case .current: minimizeToSide(menuBar: menuBar); return
+        case .side(let id):
+            if let i = side.firstIndex(where: { $0.id == id }) { side[i].inMenuBar = menuBar ? true : nil }
+        case .category: break
         }
         open = .current
         save()
@@ -183,10 +309,49 @@ final class ShelfStore {
     }
 
     func renameCategory(_ id: UUID, to name: String) {
-        guard let i = categories.firstIndex(where: { $0.id == id }) else { return }
         let clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !clean.isEmpty { categories[i].name = clean; save() }
+        if let i = categories.firstIndex(where: { $0.id == id }) {
+            if !clean.isEmpty { categories[i].name = clean; save() }
+        } else if let i = side.firstIndex(where: { $0.id == id }) {
+            side[i].name = clean.isEmpty ? nil : clean; save()     // empty: back to the automatic name
+        }
     }
+
+    /// An empty category (Shelves › New Category), e.g. "Work" kept in the menu bar.
+    @discardableResult
+    func addCategory(named name: String, icon: String? = nil, pinned: Bool = false) -> UUID {
+        let clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let existing = categories.first(where: { $0.name?.localizedCaseInsensitiveCompare(clean) == .orderedSame }) { return existing.id }
+        var c = ShelfSet(name: clean.isEmpty ? "Category \(categories.count + 1)" : clean)
+        c.icon = icon; c.pinned = pinned && canPinMore ? true : nil
+        categories.append(c)
+        save()
+        return c.id
+    }
+
+    func setLook(_ id: UUID, icon: String?, color: String?) {
+        guard let i = categories.firstIndex(where: { $0.id == id }) else { return }
+        categories[i].icon = icon; categories[i].color = color
+        save()
+    }
+
+    /// At most this many categories keep an icon in the menu bar (more would crowd it).
+    static let maxPinned = 5
+
+    /// False when pinning would go over `maxPinned`.
+    @discardableResult
+    func setPinned(_ id: UUID, _ on: Bool) -> Bool {
+        guard let i = categories.firstIndex(where: { $0.id == id }) else { return false }
+        if on, categories[i].pinned != true, pinnedCategories.count >= Self.maxPinned { return false }
+        categories[i].pinned = on ? true : nil
+        save()
+        return true
+    }
+
+    var canPinMore: Bool { pinnedCategories.count < Self.maxPinned }
+
+    /// Categories with their own icon in the menu bar.
+    var pinnedCategories: [ShelfSet] { categories.filter { $0.pinned == true } }
 
     func deleteCategory(_ id: UUID) {
         categories.removeAll { $0.id == id }
@@ -202,11 +367,13 @@ final class ShelfStore {
     }
 
     /// Adds files straight into a side shelf or category (dropped on its row).
-    func add(_ urls: [URL], to target: ShelfTarget) {
+    @discardableResult
+    func add(_ urls: [URL], to target: ShelfTarget) -> Int {
         let previous = open
         open = target
-        add(urls)
+        let n = add(urls)
         open = previous
+        return n
     }
 
     /// Brings back an older shelf as the current one.
@@ -253,12 +420,19 @@ final class ShelfStore {
         save()
     }
 
-    /// Keeps 5 shelves; files Apex saved for dropped-out shelves are removed.
-    private func trim() {
-        while shelves.count > Self.keep {
-            let old = shelves.removeLast()
-            try? FileManager.default.removeItem(at: folder.appendingPathComponent(old.id.uuidString, isDirectory: true))
-        }
+    /// Removes a recent shelf, and any files Apex saved for it (images dropped
+    /// without a file). The user's own files are never touched.
+    func removeRecent(_ id: UUID) {
+        guard let i = shelves.indices.dropFirst().first(where: { shelves[$0].id == id }) else { return }
+        let old = shelves.remove(at: i)
+        try? FileManager.default.removeItem(at: folder.appendingPathComponent(old.id.uuidString, isDirectory: true))
+        save()
+    }
+
+    func clearRecent() {
+        for old in shelves.dropFirst() { try? FileManager.default.removeItem(at: folder.appendingPathComponent(old.id.uuidString, isDirectory: true)) }
+        shelves = [current]
+        save()
     }
 
     private func save() {

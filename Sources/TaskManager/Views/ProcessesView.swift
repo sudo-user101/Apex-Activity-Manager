@@ -1,4 +1,5 @@
 import AppKit
+import ProcessIdentityCore
 import SwiftUI
 
 struct ProcessesView: View {
@@ -111,10 +112,13 @@ enum ProcessMenu {
         guard !pids.isEmpty else { return nil }
         let targets = model.withHelpers(pids)
         let isOptimized = targets.allSatisfy(model.optimized.contains)
+        // The exact processes on screen when the menu opened (PID + start
+        // time): a choice made later never acts on a reused PID.
+        let chosen = model.identities(pids), family = model.identities(targets)
         var items: [NSMenuItem] = [
-            ClosureMenuItem(title: "Quit") { model.end(pids: pids, force: false) },
-            ClosureMenuItem(title: "Force Quit") { model.end(pids: pids, force: true) },
-            ClosureMenuItem(title: "Quit with Child Processes") { model.endTree(pids: model.withHelpers(pids), force: false) },
+            ClosureMenuItem(title: "Quit") { model.end(chosen, force: false) },
+            ClosureMenuItem(title: "Force Quit") { model.end(chosen, force: true) },
+            ClosureMenuItem(title: "Quit with Child Processes") { model.endTree(family, force: false) },
             .separator(),
             pids.allSatisfy({ model.process($0)?.state == .stopped })
                 ? ClosureMenuItem(title: "Resume") { model.setPaused(pids: model.withHelpers(pids), false) }
@@ -188,11 +192,12 @@ struct ProcessToolbar: ToolbarContent {
             Menu {
                 Button("Run New Task…") { model.showRunTask = true }
                 Button("What’s Using a File or Disk…") { model.showWhoIsUsing = true }
+                Button("Census: What’s Using the Most…") { model.showCensus = true }
             } label: {
                 Label("More", systemImage: "ellipsis.circle")
             }
             .menuIndicator(.hidden)
-            .help("Run a new task, or find what’s using a file or disk")
+            .help("Run a new task, find what’s using a file or disk, or see what’s using the most of everything")
         }
     }
 }
@@ -215,7 +220,7 @@ struct SummaryBar: View {
             stat("User", Fmt.percent(s.cpu.user) + "%", .blue)
             stat("Idle", Fmt.percent(max(0, 100 - s.cpu.total)) + "%", .secondary)
             Divider().frame(height: 14)
-            stat("Memory", Fmt.bytes(s.memory.used) + " of " + Fmt.bytes(s.memory.total), .windowsBlue)
+            stat("Memory", Fmt.bytes(s.memory.used) + " of " + Fmt.bytes(s.memory.total), MemoryColor.used)
             if !model.optimized.isEmpty {
                 Label("\(model.optimized.count) optimized", systemImage: "leaf.fill")
                     .foregroundStyle(.green)

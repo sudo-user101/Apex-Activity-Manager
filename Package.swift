@@ -9,6 +9,12 @@ let package = Package(
     targets: [
         .target(name: "FanControlCore", path: "Sources/FanControlCore"),
         .target(name: "DetectionCore", path: "Sources/DetectionCore"),
+        .target(name: "ProcessIdentityCore", path: "Sources/ProcessIdentityCore"),
+        .executableTarget(
+            name: "ApexSignal",
+            dependencies: ["ProcessIdentityCore"],
+            path: "Sources/ApexSignal"
+        ),
         .executableTarget(
             name: "ApexFanHelper",
             dependencies: ["FanControlCore"],
@@ -17,7 +23,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "TaskManager",
-            dependencies: ["FanControlCore", "DetectionCore"],
+            dependencies: ["FanControlCore", "DetectionCore", "ProcessIdentityCore"],
             path: "Sources/TaskManager",
             swiftSettings: [.unsafeFlags(["-Osize"], .when(configuration: .release))],
             linkerSettings: [
@@ -31,8 +37,9 @@ let package = Package(
         ),
         .testTarget(
             name: "TaskManagerTests",
-            dependencies: ["TaskManager", "FanControlCore", "DetectionCore"],
-            path: "Tests/TaskManagerTests"
+            dependencies: ["TaskManager", "FanControlCore", "DetectionCore", "ProcessIdentityCore", "ApexSignal"],
+            path: "Tests/TaskManagerTests",
+            exclude: ["Fixtures"]      // read from the source folder (#filePath), not bundled
         ),
     ]
 )

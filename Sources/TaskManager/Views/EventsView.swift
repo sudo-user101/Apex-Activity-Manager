@@ -142,7 +142,7 @@ private struct EventDetail: View {
                         Text(event.rule == .memoryGrowth ? "Memory over time" : "Over time").font(.headline)
                         let span = event.date.timeIntervalSince(event.started)
                         let times = series.indices.map { event.started.addingTimeInterval(span * Double($0) / Double(series.count - 1)) }
-                        LineGraph(series: [.init(values: series, color: .messageBlue, name: "Memory")], maxValue: (series.max() ?? 1) * 1.15)
+                        LineGraph(series: [.init(values: series, color: MemoryColor.used, name: "Memory")], maxValue: (series.max() ?? 1) * 1.15)
                             .environment(\.graphTimeline, GraphTimeline(times: times, window: max(span, 1), end: event.date))
                             .environment(\.graphUnit, .bytes)
                             .environment(\.advancedGraph, true)

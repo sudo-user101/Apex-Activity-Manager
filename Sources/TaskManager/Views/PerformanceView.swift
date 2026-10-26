@@ -19,7 +19,7 @@ enum Resource: String, CaseIterable, Identifiable {
     var color: Color {
         switch self {
         case .cpu: return .blue
-        case .memory: return .messageBlue
+        case .memory: return MemoryColor.used
         case .disk: return .green
         case .cloud: return .cyan
         case .network: return .orange
@@ -144,7 +144,7 @@ private struct ResourceCard: View {
             Group {
                 switch resource {
                 case .cpu: LineGraph(series: [.init(values: h.cpu, color: resource.color)], gridLines: false, cornerRadius: 4)
-                case .memory: LineGraph(series: [.init(values: h.memory, color: .messageBlue)], gridLines: false, cornerRadius: 4)
+                case .memory: LineGraph(series: [.init(values: h.memory, color: MemoryColor.used)], gridLines: false, cornerRadius: 4)
                 case .disk: LineGraph(series: [.init(values: h.diskRead, color: .green), .init(values: h.diskWrite, color: .red, fill: false)], maxValue: nil, gridLines: false, cornerRadius: 4)
                 case .network: LineGraph(series: [.init(values: h.netIn, color: .orange), .init(values: h.netOut, color: .blue, fill: false)], maxValue: nil, gridLines: false, cornerRadius: 4)
                 case .gpu: LineGraph(series: [.init(values: h.gpu, color: resource.color)], gridLines: false, cornerRadius: 4)
@@ -157,7 +157,10 @@ private struct ResourceCard: View {
                         .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 4))
                 case .battery: LineGraph(series: [.init(values: h.power, color: .green)],
                                          maxValue: nil, gridLines: false, cornerRadius: 4)
-                case .sensors: LineGraph(series: [.init(values: HardwareStore.shared.cpuTempHistory, color: .red)], gridLines: false, cornerRadius: 4)
+                // The battery's temperature on laptops; the CPU's on Macs without a battery.
+                case .sensors: LineGraph(series: [.init(values: HardwareStore.shared.hasBattery ? HardwareStore.shared.batteryTempHistory
+                                                                                                : HardwareStore.shared.cpuTempHistory, color: .red)],
+                                         gridLines: false, cornerRadius: 4)
                     .environment(\.graphTimeline, HardwareStore.shared.timeline(minutes: model.graphMinutes))
                 }
             }
@@ -191,7 +194,9 @@ private struct ResourceCard: View {
             if !HardwareStore.shared.hasBattery { return b.systemPower.map { String(format: "%.1f W", $0) } ?? "—" }
             return "\(b.percent)% · " + (b.systemPower.map { String(format: "%.1f W", $0) } ?? "health \(Int(b.health.rounded()))%")
         case .sensors:
-            return HardwareStore.shared.sensors.cpuTemp.map { String(format: "CPU %.0f °C", $0) } ?? "—"
+            let hw = HardwareStore.shared
+            if hw.hasBattery, let t = hw.battery.temperature { return String(format: "Battery %.0f °C", t) }
+            return hw.sensors.cpuTemp.map { String(format: "CPU %.0f °C", $0) } ?? "—"
         }
     }
 
@@ -210,21 +215,35 @@ enum MemSeries: String, CaseIterable, Identifiable {
         case .free: return "Free"
         case .swap: return "Swap used"
         case .apps: return "Apps"
-        case .system: return "Operating System Memory"
+        case .system: return "Operating system"
         case .compressed: return "Compressed"
         case .cache: return "Cache"
         }
     }
+    /// The same colour wherever the figure appears (graph, legend, breakdown).
     var color: Color {
         switch self {
-        case .used: return .messageBlue
-        case .available: return .mint
-        case .free: return Color(white: 0.75)
-        case .swap: return .pink
-        case .apps: return .windowsBlue
-        case .system: return .windowsTeal
-        case .compressed: return .windowsLavender
-        case .cache: return .gray
+        case .used: return MemoryColor.used
+        case .available: return MemoryColor.available
+        case .free: return MemoryColor.free
+        case .swap: return MemoryColor.swap
+        case .apps: return MemoryColor.apps
+        case .system: return MemoryColor.system
+        case .compressed: return MemoryColor.compressed
+        case .cache: return MemoryColor.cache
+        }
+    }
+    /// What it means, for the breakdown's tooltips.
+    var help: String {
+        switch self {
+        case .used: return "Apps, the operating system and compressed memory together, as macOS counts it."
+        case .available: return "What apps can still have without swapping: free memory plus cache macOS can reclaim."
+        case .free: return "Not holding anything right now."
+        case .swap: return "Memory moved to the startup disk because RAM was short. Some is normal; a lot slows the Mac down."
+        case .apps: return "Memory apps are using for their own data."
+        case .system: return "Memory the operating system keeps in RAM and can’t move or compress (wired)."
+        case .compressed: return "App memory macOS has compressed to make room, the space it takes in RAM."
+        case .cache: return "Files kept in RAM so they open quickly; given back to apps as soon as they need it."
         }
     }
     /// History values as % of physical RAM.
@@ -317,7 +336,7 @@ private struct ResourceDetail: View {
             case .memory:
                 HStack {
                     if memSelection.isEmpty {
-                        legend([("RAM used", .messageBlue), ("Memory pressure: \(s.memory.pressureLevel.title)", s.memory.pressureLevel.color)])
+                        legend([("RAM used", MemoryColor.used), ("Memory pressure", s.memory.pressureLevel.color)])
                     } else {
                         legend(MemSeries.allCases.filter(memSelection.contains).map { ($0.title, $0.color) })
                         Button("Show default") { withAnimation(.easeOut(duration: 0.15)) { memSelection = [] } }
@@ -326,15 +345,16 @@ private struct ResourceDetail: View {
                     Spacer()
                     RangeCaption()
                 }
-                // RAM in use as a blue area; memory pressure as a line on top —
-                // iMessage green while normal, yellow / red when it rises.
+                // RAM in use: the blue line over a light fill. Pressure: a thinner
+                // line on top, neutral while normal, yellow / red only when it rises.
                 LineGraph(series: memSelection.isEmpty
-                          ? [.init(values: h.memory, color: .messageBlue, name: "RAM used"),
+                          ? [.init(values: h.memory, color: MemoryColor.used, name: "RAM used", lineWidth: 1.6, flatFill: 0.15),
                              .init(values: h.pressure, color: s.memory.pressureLevel.color, fill: false,
                                    pointColors: h.pressureLevels.count == h.pressure.count ? h.pressureLevels.map(\.color) : nil,
-                                   name: "Pressure")]
+                                   name: "Memory pressure", lineWidth: 1.1)]
                           : MemSeries.allCases.filter(memSelection.contains).map {
-                              .init(values: $0.values(h), color: $0.color, fill: memSelection.count == 1, name: $0.title)
+                              .init(values: $0.values(h), color: $0.color, fill: memSelection.count == 1, name: $0.title,
+                                    lineWidth: 1.4, flatFill: memSelection.count == 1 ? 0.18 : nil)
                           },
                           maxValue: max(100, memSelection.contains(.swap) ? (visibleValues(h.memSwap, model.graphTimeline).max() ?? 0) * 1.1 : 100))
                     .overlay(alignment: .topLeading) {
@@ -712,84 +732,134 @@ private struct CPUBreakdown: View {
     }
 }
 
-/// Memory panel: totals on the left, what the used
-/// memory is made of on the right, pressure last. Swap opens the per-app list.
-private struct MemoryTiles: View {
+/// Memory panel, in three quiet columns: the overview (used, available,
+/// free, swap), what it's made of (apps, operating system, compressed, cache,
+/// with a bar of the whole RAM), and memory pressure. Rows toggle their
+/// series on the graph above; Swap opens the per-app list.
+struct MemoryTiles: View {
     let memory: MemoryStats
     @Binding var selection: Set<MemSeries>
     @State private var showSwap = false
 
     var body: some View {
         let m = memory
-        VStack(alignment: .leading, spacing: 14) {
-        HStack(alignment: .top, spacing: 28) {
-            VStack(alignment: .leading, spacing: 10) {
-                toggleRow(.used, "\(Fmt.bytes(m.used)) (\(Fmt.percent(m.percent, decimals: 0))%)")
-                toggleRow(.available, "\(Fmt.bytes(m.total > m.used ? m.total - m.used : 0)) (\(pct(m.total > m.used ? m.total - m.used : 0)))")
-                let free = m.total > m.used + m.cached ? m.total - m.used - m.cached : 0
-                toggleRow(.free, "\(Fmt.bytes(free)) (\(pct(free)))")
-                toggleRow(.swap, m.swapTotal > 0 ? "\(Fmt.bytes(m.swapUsed)) of \(Fmt.bytes(m.swapTotal))" : "None") {
+        let available = m.total > m.used ? m.total - m.used : 0
+        let free = MemoryComposition.free(m)
+        HStack(alignment: .top, spacing: 26) {
+            column("Overview") {
+                toggleRow(.used, m.used)
+                toggleRow(.available, available)
+                toggleRow(.free, free)
+                toggleRow(.swap, m.swapUsed, text: m.swapTotal > 0 ? "\(Fmt.bytes(m.swapUsed)) of \(Fmt.bytes(m.swapTotal))" : "None", percent: false) {
+                    // A round button of its own, big enough to hit without
+                    // touching the row (which puts swap on the graph).
                     Button { showSwap.toggle() } label: {
-                        Image(systemName: "chevron.down")
-                            .font(.caption.weight(.semibold)).foregroundStyle(.tint)
-                            .rotationEffect(.degrees(showSwap ? 180 : 0))
-                            .padding(.horizontal, 2)
+                        Image(systemName: "arrow.up.circle.fill")
+                            .font(.system(size: 16))
+                            .symbolRenderingMode(.hierarchical)
+                            .foregroundStyle(showSwap ? MemoryColor.swap : .secondary)
+                            .frame(width: 24, height: 24)
+                            .contentShape(Circle())
                     }
                     .buttonStyle(.plain)
+                    .padding(.vertical, -4)
                     .help("Show which apps are using swap")
                     .popover(isPresented: $showSwap, arrowEdge: .bottom) { SwapPopover(memory: m).frame(width: 640) }
                 }
             }
-            .frame(maxWidth: .infinity)
             Divider()
-            VStack(alignment: .leading, spacing: 10) {
-                toggleRow(.apps, "\(Fmt.bytes(m.app)) (\(pct(m.app)))")
-                toggleRow(.system, "\(Fmt.bytes(m.wired)) (\(pct(m.wired)))")
-                toggleRow(.compressed, "\(Fmt.bytes(m.compressed)) (\(pct(m.compressed)))")
-                toggleRow(.cache, "\(Fmt.bytes(m.cached)) (\(pct(m.cached)))")
+            column("Composition") {
+                compositionBar(m)
+                toggleRow(.apps, m.app)
+                toggleRow(.system, m.wired)
+                toggleRow(.compressed, m.compressed)
+                toggleRow(.cache, m.cached)
             }
-            .frame(maxWidth: .infinity)
             Divider()
-            VStack(alignment: .center, spacing: 4) {
-                Text("Memory pressure").foregroundStyle(.secondary)
-                Text(Fmt.percent(m.pressure, decimals: 0) + "%")
-                    .font(.title.weight(.semibold)).monospacedDigit().foregroundStyle(m.pressureLevel.color)
-            }
-            .frame(width: 150, alignment: .center)
-            .frame(maxHeight: .infinity, alignment: .center)
+            pressure(m)
+                .frame(width: 150, alignment: .leading)
         }
         .padding(16)
-        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
+        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func column(_ title: String, @ViewBuilder _ content: () -> some View) -> some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Text(title).font(.caption.weight(.medium)).foregroundStyle(.secondary)
+            content()
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// The whole RAM: apps, operating system, compressed and cache (which
+    /// don't overlap), the rest free (the empty track).
+    private func compositionBar(_ m: MemoryStats) -> some View {
+        let parts = MemoryComposition.parts(m)
+        // Never wider than the bar, even if the counts add up past the total for a moment.
+        let whole = max(m.total, parts.reduce(0) { $0 + $1.1 }, 1)
+        return GeometryReader { g in
+            HStack(spacing: 1) {
+                ForEach(parts, id: \.0) { item, value in
+                    Rectangle().fill(item.color.opacity(selection.isEmpty || selection.contains(item) ? 1 : 0.35))
+                        .frame(width: max(0, g.size.width * CGFloat(value) / CGFloat(whole) - 1))
+                }
+                Spacer(minLength: 0)
+            }
+        }
+        .frame(height: 6)
+        .background(Color.primary.opacity(0.08))
+        .clipShape(Capsule())
+        .padding(.bottom, 2)
+        .help("All \(Fmt.bytes(m.total)) of RAM: apps, operating system, compressed and cache; the empty part is free.")
+    }
+
+    /// macOS's own pressure state, and the kernel's score beside it.
+    private func pressure(_ m: MemoryStats) -> some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Text("Memory pressure").font(.caption.weight(.medium)).foregroundStyle(.secondary)
+            // The score, in the colour of macOS's own pressure level: green, yellow, red.
+            Text(Fmt.percent(m.pressure, decimals: 0) + "%")
+                .font(.system(size: 28, weight: .semibold)).monospacedDigit()
+                .foregroundStyle(m.pressureLevel.color)
+                .contentTransition(.numericText())
+                .animation(.easeOut(duration: 0.2), value: Int(m.pressure))
+        }
+        .help("""
+              The pressure score: 100 minus the kernel’s memory level (kern.memorystatus_level), how much of the memory macOS likes to keep at hand is in use. It isn’t the same as RAM used.
+              Its colour is macOS’s own pressure state right now: green Normal, yellow Elevated, red Critical (\(m.pressureLevel.title)).
+              """)
     }
 
     private func pct(_ v: UInt64) -> String {
         "\(Int((Double(v) / Double(max(1, memory.total)) * 100).rounded()))%"
     }
 
-    /// A panel row that toggles its series on the graph above.
-    private func toggleRow<Extra: View>(_ item: MemSeries, _ value: String,
+    /// A row: its colour, name, size and share of RAM, aligned in columns.
+    /// Clicking it puts its series on the graph above.
+    private func toggleRow<Extra: View>(_ item: MemSeries, _ bytes: UInt64, text: String? = nil, percent: Bool = true,
                                         @ViewBuilder extra: () -> Extra = { EmptyView() }) -> some View {
         let on = selection.contains(item)
         return HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Circle().fill(item.color).frame(width: 8, height: 8)
-                .overlay(Circle().strokeBorder(Color.primary.opacity(on ? 0.9 : 0), lineWidth: 1.5).padding(-2))
-            Text(item.title).foregroundStyle(on ? .primary : .secondary).fontWeight(on ? .semibold : .regular)
+            Circle().fill(item.color).frame(width: 7, height: 7)
+                .overlay(Circle().strokeBorder(Color.primary.opacity(on ? 0.85 : 0), lineWidth: 1.2).padding(-2.5))
+            Text(item.title).foregroundStyle(on ? .primary : .secondary).fontWeight(on ? .medium : .regular)
                 .lineLimit(1).fixedSize()
             extra()
             Spacer(minLength: 8)
-            Text(value).fontWeight(.medium).monospacedDigit().lineLimit(1).fixedSize()
+            Text(text ?? Fmt.bytes(bytes)).fontWeight(.medium).monospacedDigit().lineLimit(1).fixedSize()
+            Text(percent && text == nil ? pct(bytes) : "").font(.callout).foregroundStyle(.tertiary).monospacedDigit()
+                .frame(width: 36, alignment: .trailing)
         }
-        .padding(.horizontal, 6).padding(.vertical, 3)
-        .background(on ? item.color.opacity(0.16) : .clear, in: RoundedRectangle(cornerRadius: 6))
-        .padding(.horizontal, -6).padding(.vertical, -3)
+        .padding(.horizontal, 6).padding(.vertical, 2)
+        .background(on ? item.color.opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: 5))
+        .padding(.horizontal, -6).padding(.vertical, -2)
         .contentShape(Rectangle())
         .onTapGesture {
             withAnimation(.easeOut(duration: 0.15)) {
                 if on { selection.remove(item) } else { selection.insert(item) }
             }
         }
-        .help(on ? "Remove \(item.title) from the graph" : "Show \(item.title) on the graph")
+        .help(item.help + (on ? " Click to take it off the graph." : " Click to show it on the graph."))
     }
 
     private func row(_ label: String, _ value: String, dot: Color? = nil) -> some View {
@@ -902,12 +972,16 @@ private struct SwapPopover: View {
 /// shown compactly under the resource list.
 private struct ThisMacPanel: View {
     @State private var info: DeviceInfo?
+    @State private var adding = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
+            // "This Mac" opens the menu of servers and containers (MachinePicker).
             HStack {
-                Text("This Mac").font(.headline)
+                MachinePicker()
                 Spacer()
+                Button { adding = true } label: { Image(systemName: "plus") }
+                    .buttonStyle(.borderless).help("Add a server")
                 Button { Task { await load() } } label: { Image(systemName: "arrow.clockwise") }
                     .buttonStyle(.borderless).help("Refresh")
             }
@@ -921,6 +995,7 @@ private struct ThisMacPanel: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .sheet(isPresented: $adding) { AddServerSheet() }
         .task {
             // Network settings rarely change; refresh every 30 s while visible.
             while !Task.isCancelled {
@@ -1013,6 +1088,8 @@ struct NetworkPage: View {
     let device: NetworkDevice
     let inUse: Bool
     @State private var showDoctor = false
+    @State private var showShell = false
+    @Environment(\.openWindow) private var openWindow
 
     /// The connection to show: the chosen tab, else the one in use, else the first.
     static func device(for item: PerfItem, in s: SystemSnapshot) -> NetworkDevice? {
@@ -1029,15 +1106,25 @@ struct NetworkPage: View {
                                   d.isUp ? d.linkText : "not connected", inUse ? "in use for the internet" : ""]
                         .filter { !$0.isEmpty }.joined(separator: " · "),
                        subtitleColor: d.isUp ? .secondary : .orange,
-                       accessory: AnyView(
+                       accessory: AnyView(HStack(spacing: 8) {
                            Button { showDoctor = true } label: { Image(systemName: "stethoscope") }
                                .buttonStyle(.bordered)
-                               .help("Network Doctor: find out why the internet is slow or not working")),
+                               .help("Network Doctor: find out why the internet is slow or not working")
+                           Button { showShell = true } label: { Image(systemName: "apple.terminal") }
+                               .buttonStyle(.bordered)
+                               .help("Shell: ready-made network and system commands, or your own")
+                       }),
                        record: .network)
                 .sheet(isPresented: $showDoctor) {
                     NetworkDoctorView(device: d, primary: model.snapshot.system.network.interface)
                 }
-                .onAppear { if inUse, ProcessInfo.processInfo.environment["APEX_OPEN"] == "netdoctor" { showDoctor = true } }
+                .sheet(isPresented: $showShell) {
+                    ShellView(onPopOut: { showShell = false; openWindow(id: "shell") })
+                }
+                .onAppear {
+                    if inUse, ProcessInfo.processInfo.environment["APEX_OPEN"] == "netdoctor" { showDoctor = true }
+                    if inUse, ProcessInfo.processInfo.environment["APEX_OPEN"] == "shell" { showShell = true }
+                }
             HStack {
                 HStack(spacing: 14) {
                     ForEach([("Received", Color.orange), ("Sent", Color.blue)], id: \.0) { item in
@@ -1264,8 +1351,8 @@ private struct ConnectionDetails: View {
 }
 
 extension PressureLevel {
-    /// Pressure colours: green = fine, yellow = under strain, red = critical.
-    var color: Color { self == .normal ? .messageGreen : self == .warning ? .yellow : .red }
+    /// Pressure colours: green while normal; yellow and red only when it rises.
+    var color: Color { self == .normal ? MemoryColor.normal : self == .warning ? MemoryColor.elevated : MemoryColor.critical }
 }
 
 
@@ -1384,7 +1471,7 @@ struct RangePicker: View {
 }
 
 /// Sidebar row with the system selection look (accent background, white text).
-private struct SidebarRow<Content: View>: View {
+struct SidebarRow<Content: View>: View {
     let selected: Bool
     @ViewBuilder var content: Content
     var body: some View {

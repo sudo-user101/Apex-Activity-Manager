@@ -243,13 +243,19 @@ verification afterwards.
 - **Network Doctor**, an internet speed test, your public IP, and each
   app's last 10 minutes of traffic.
 - **Remove apps** with or without everything they left behind.
+- **Servers and containers:** pick a Linux server or a Docker container from
+  the This Mac menu and the whole app shows it: processes, performance,
+  users, services, and a 1, 6 or 24-hour **Report** you can save as PDF.
+  Connect over SSH, or install
+  [Apex Server Edition](https://github.com/sudo-user101/Apex-Activity-Manager-Server-Edition)
+  on the server for everything, encrypted, without SSH.
 
 ## Install
 
 1. Download the latest **.dmg** from
    [Releases](https://github.com/sudo-user101/Apex-Activity-Manager/releases/latest).
 2. Open it and drag **Apex Activity Manager** onto **Applications**.
-3. Version 1.2.0 isn't notarized: the first time, macOS may say it can't check
+3. Version 1.3.0 isn't notarized: the first time, macOS may say it can't check
    the app. Open **System Settings › Privacy & Security** and click
    **Open Anyway**. Releases signed with Developer ID and notarized by Apple
    open normally.
@@ -315,7 +321,7 @@ More: [Architecture](docs/ARCHITECTURE.md) · [Releasing](docs/RELEASING.md) · 
 
 See the [open issues](https://github.com/sudo-user101/Apex-Activity-Manager/issues) for what's being worked on next.
 
-- A native **Windows** edition, and a **Linux** edition.
+- A native **Windows** edition.
 - AI-assisted explanations: your own API key, a local model, or an Apex
   subscription ([design](docs/AI-DIAGNOSTICS.md)).
 - A Developer ID-signed, notarized release.

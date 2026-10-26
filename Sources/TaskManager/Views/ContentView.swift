@@ -3,6 +3,7 @@ import SwiftUI
 struct ContentView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.openWindow) private var openWindow
+    @State private var removalTest: String?
 
     var body: some View {
         @Bindable var model = model
@@ -10,16 +11,24 @@ struct ContentView: View {
         // control centred in the toolbar (⌘1…⌘6 also work).
         NavigationStack {
             Group {
-                switch model.section {
-                case .processes: ProcessesView()
-                case .performance: PerformanceView()
-                case .ai: LocalAIView()
-                case .history: HistoryView()
-                case .startup: StartupView()
-                case .users: UsersView()
-                case .services: ServicesView()
+                // A server or container (This Mac menu) replaces this Mac on the
+                // pages that follow it; the others stay this Mac's.
+                if !model.target.isMac && model.section.followsTarget {
+                    RemotePage(section: model.section)
+                } else {
+                    switch model.section {
+                    case .processes: ProcessesView()
+                    case .performance: PerformanceView()
+                    case .ai: AssistantView()
+                    case .history: HistoryView()
+                    case .startup: StartupView()
+                    case .users: UsersView()
+                    case .services: ServicesView()
+                    case .report: EmptyView()   // servers only
+                    }
                 }
             }
+            .modifier(MachinePoller())
             .id(model.section)
             .transition(.opacity)
             .animation(.easeOut(duration: 0.14), value: model.section)
@@ -28,14 +37,14 @@ struct ContentView: View {
             .toolbar {
                 ToolbarItem(placement: .principal) {
                     Picker("View", selection: $model.section) {
-                        ForEach(AppSection.allCases) { s in
+                        ForEach(AppSection.tabs(model.target)) { s in
                             Text(s.shortTitle).tag(s)
                         }
                     }
                     .pickerStyle(.segmented)
                     .labelsHidden()
                     .fixedSize()
-                    .help("Switch view (⌘1–⌘6)")
+                    .help("Switch view (⌘1–⌘7)")
                 }
                 ToolbarItem(placement: .primaryAction) { RecordButton() }
             }
@@ -46,6 +55,8 @@ struct ContentView: View {
         }
         .sheet(isPresented: $model.showWelcome) { OnboardingView() }
         .task {
+            // Test switch: APEX_OPEN=assistant opens the Assistant window.
+            if ["assistant", "assistantkeys"].contains(ProcessInfo.processInfo.environment["APEX_OPEN"] ?? "") { openWindow(id: "assistant") }
             // First launch (or APEX_OPEN=welcome): the welcome flow.
             if !UserDefaults.standard.bool(forKey: "onboarded") || ProcessInfo.processInfo.environment["APEX_OPEN"] == "welcome" {
                 try? await Task.sleep(for: .milliseconds(600))
@@ -58,11 +69,29 @@ struct ContentView: View {
         .sheet(isPresented: $model.showFreeMemory) {
             FreeMemorySheet()
         }
+        .sheet(isPresented: $model.showCensus) { CensusSheet() }
         .sheet(isPresented: $model.showWhoIsUsing) {
             WhoIsUsingSheet()
         }
         .sheet(isPresented: $model.showCleanup) {
             CleanupSheet()
+        }
+        // Test switch: APEX_REMOVE_APP=/Applications/X.app opens the remove sheet for it (removes nothing by itself).
+        .sheet(isPresented: Binding(get: { removalTest != nil }, set: { if !$0 { removalTest = nil } })) {
+            if let p = removalTest { AppRemovalSheet(path: p) { _ in } }
+        }
+        .task { removalTest = ProcessInfo.processInfo.environment["APEX_REMOVE_APP"] }
+        // Test switch: APEX_TARGET=servers / containers / a server's or container's name.
+        .task {
+            guard let t = ProcessInfo.processInfo.environment["APEX_TARGET"] else { return }
+            let store = ServerStore.shared
+            switch t {
+            case "servers": model.target = .allServers
+            case "containers": model.target = .allContainers
+            default:
+                await store.refreshLocal()
+                if let s = store.servers.first(where: { $0.name == t }) ?? store.localConfigs.first(where: { $0.name == t }) { model.target = .server(s.id) }
+            }
         }
         .alert(model.adminPrompt?.title ?? "", isPresented: Binding(
             get: { model.adminPrompt != nil }, set: { if !$0 { model.adminPrompt = nil } }),

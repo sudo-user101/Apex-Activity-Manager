@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  apex-signal (run as root through the administrator prompt, hardened
+  runtime). It asks for no exceptions: it reads start times (sysctl) and
+  task *name* ports (not task ports) for audit tokens, and signals through
+  the token. Checked unprivileged in tests; as root only by hand.
+-->
+<plist version="1.0">
+<dict/>
+</plist>

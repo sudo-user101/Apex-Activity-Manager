@@ -1,4 +1,5 @@
 import Foundation
+import ProcessIdentityCore
 
 /// Which part of the process tree a process belongs to.
 enum ProcessKind: Int, Sendable, CaseIterable {
@@ -70,6 +71,12 @@ struct ProcessInfoSample: Identifiable, Sendable, Equatable {
     /// In Darwin background mode (our "Optimize", or set by macOS / the app
     /// itself). Read from the kernel every tick, so it is always truthful.
     var background: Bool
+    /// Start time in microseconds since 1970, from the kernel: with the PID,
+    /// it names this process and no other (PIDs are reused).
+    var startedMicros: Int64 = 0
+
+    /// What actions target: this process, not whatever has its PID later.
+    var identity: ProcessIdentity { ProcessIdentity(pid: pid, startMicros: startedMicros) }
 }
 
 extension ProcessInfoSample {

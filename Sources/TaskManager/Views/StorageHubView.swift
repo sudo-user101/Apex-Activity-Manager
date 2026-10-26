@@ -5,7 +5,8 @@ struct CleanupSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     enum Mode { case home, optimize, analyze, clean }
-    @State private var mode: Mode = .home
+    // Test switch: APEX_OPEN=clean opens straight on Clean.
+    @State private var mode: Mode = ProcessInfo.processInfo.environment["APEX_OPEN"] == "clean" ? .clean : .home
 
     var body: some View {
         Group {

@@ -1,5 +1,7 @@
 import AppKit
 import Darwin
+import ProcessIdentityCore
+import Security
 
 /// Process control. Every call reports failure instead of failing silently,
 /// and permission failures can
@@ -11,39 +13,89 @@ enum ProcessActions {
         case failed(String)
     }
 
-    /// Quits regular apps politely (like Dock > Quit); signals everything else.
-    static func end(pids: [pid_t], force: Bool) -> Outcome {
-        var needsAdmin = false
-        var lastError: String?
-        for pid in pids {
-            if let app = NSRunningApplication(processIdentifier: pid), app.activationPolicy == .regular {
-                let ok = force ? app.forceTerminate() : app.terminate()
-                if ok { continue }
-            }
-            if Darwin.kill(pid, force ? SIGKILL : SIGTERM) != 0 {
-                if errno == EPERM { needsAdmin = true }
-                else if errno != ESRCH { lastError = String(cString: strerror(errno)) }
+    /// What happened to each process an action was meant for.
+    struct Report: Equatable {
+        /// Ended / paused / resumed, or already gone.
+        var done: [ProcessIdentity] = []
+        /// Still running, but only an administrator can act on them.
+        var needsAdmin: [ProcessIdentity] = []
+        /// Not touched, for safety: the PID belongs to another process now,
+        /// the identity couldn't be checked, or Apex never acts on it.
+        var refused: [Refusal] = []
+        var failures: [String] = []
+        /// The administrator prompt was cancelled.
+        var cancelled = false
+
+        struct Refusal: Equatable { let target: ProcessIdentity; let result: SignalResult }
+
+        mutating func add(_ target: ProcessIdentity, _ result: SignalResult) {
+            switch result {
+            case .sent, .exited: done.append(target)
+            case .notPermitted: needsAdmin.append(target)
+            case .reused, .unverifiable, .protected: refused.append(Refusal(target: target, result: result))
+            case .failed(let e): failures.append(String(cString: strerror(e)))
             }
         }
-        if needsAdmin { return .needsAdmin }
-        if let lastError { return .failed(lastError) }
-        return .ok
     }
 
-    /// Freezes (SIGSTOP) or resumes (SIGCONT) processes. A paused app keeps
-    /// its windows and data but uses no CPU; macOS can compress its memory.
-    static func pause(pids: [pid_t], _ on: Bool) -> Outcome {
-        var needsAdmin = false
-        for pid in pids where Darwin.kill(pid, on ? SIGSTOP : SIGCONT) != 0 {
-            if errno == EPERM { needsAdmin = true }
+    /// Quits regular apps politely (like Dock > Quit); signals everything
+    /// else. Every target is checked against its identity right before it's
+    /// acted on; one that has exited, or whose PID now belongs to another
+    /// process, is left alone (never a PID-only kill).
+    static func end(_ targets: [ProcessIdentity], force: Bool) -> Report {
+        var report = Report()
+        for t in targets {
+            if t.pid <= 1 || t.pid == getpid() { report.add(t, .protected); continue }
+            if !force, let app = NSRunningApplication(processIdentifier: t.pid), app.activationPolicy == .regular {
+                // The instance belongs to whichever process had the PID when it
+                // was made; checking the identity after making it ties it to
+                // the intended one (a process can't exit and come back).
+                switch t.check() {
+                case .same: if app.terminate() { report.done.append(t); continue }
+                case .exited: report.done.append(t); continue
+                case .reused: report.add(t, .reused); continue
+                case .unverifiable: report.add(t, .unverifiable); continue
+                }
+            }
+            report.add(t, ProcessSignal.send(force ? SIGKILL : SIGTERM, to: t))
         }
-        return needsAdmin ? .needsAdmin : .ok
+        return report
     }
 
-    static func pauseAsAdmin(pids: [pid_t], _ on: Bool) -> Outcome {
-        let r = Shell.runAsAdmin("/bin/kill -\(on ? "STOP" : "CONT") " + pids.map(String.init).joined(separator: " "))
-        if r.status == 0 || Shell.isUserCancelled(r) { return .ok }
-        return .failed(r.stderr.trimmingCharacters(in: .whitespacesAndNewlines))
+    /// Freezes (SIGSTOP) or resumes (SIGCONT) processes, each checked against
+    /// its identity. A paused app keeps its windows and data but uses no CPU;
+    /// macOS can compress its memory.
+    static func pause(_ targets: [ProcessIdentity], _ on: Bool) -> Report {
+        var report = Report()
+        for t in targets { report.add(t, ProcessSignal.send(on ? SIGSTOP : SIGCONT, to: t)) }
+        return report
+    }
+
+    /// The same as administrator: `apex-signal` runs as root through the
+    /// password prompt and checks every identity itself (it doesn't trust
+    /// this app). `signal`: TERM, KILL, STOP or CONT.
+    static func signalAsAdmin(_ targets: [ProcessIdentity], _ signal: String) -> Report {
+        var report = Report()
+        guard !targets.isEmpty else { return report }
+        guard let tool = SignalTool.path() else {
+            report.failures.append(SignalTool.unavailable)
+            return report
+        }
+        let r = Shell.runAsAdmin(Shell.quote(tool) + " " + signal + " " + targets.map(\.argument).joined(separator: " "))
+        if Shell.isUserCancelled(r) { report.cancelled = true; return report }
+        let results = SignalTool.parse(r.stdout)
+        for t in targets {
+            switch results[t] {
+            // Root can't signal it either: macOS protects it.
+            case .notPermitted?: report.failures.append("macOS doesn’t allow it, even for an administrator.")
+            case let result?: report.add(t, result)
+            case nil: report.add(t, .unverifiable)    // no answer for it: nothing is assumed
+            }
+        }
+        if results.isEmpty, r.status != 0 {
+            report.failures.append(r.stderr.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        return report
     }
 
     /// `pids` plus every process they started, recursively.
@@ -58,12 +110,6 @@ enum ProcessActions {
         return Array(out)
     }
 
-    static func endAsAdmin(pids: [pid_t], force: Bool) -> Outcome {
-        let list = pids.map(String.init).joined(separator: " ")
-        let r = Shell.runAsAdmin("/bin/kill -\(force ? "KILL" : "TERM") \(list)")
-        if r.status == 0 { return .ok }
-        return Shell.isUserCancelled(r) ? .ok : .failed(r.stderr.trimmingCharacters(in: .whitespacesAndNewlines))
-    }
 
     static func setNice(pids: [pid_t], _ value: Int32) -> Outcome {
         var needsAdmin = false
@@ -195,5 +241,60 @@ enum ProcessActions {
             i += 1
         }
         return args.isEmpty ? nil : args.joined(separator: " ")
+    }
+}
+
+/// `apex-signal`, the tool the administrator prompt runs to end, pause or
+/// resume processes by identity.
+enum SignalTool {
+    static let unavailable = "Apex couldn’t check its administrator tool (apex-signal), so nothing was done. Reinstall Apex."
+
+    /// Inside the app; in a development build, next to the other products.
+    /// Nil when it's missing, or when the app's signature (which covers the
+    /// tool) doesn't check out: it's about to run as root.
+    static func path() -> String? {
+        let bundle = Bundle.main.bundleURL
+        if bundle.pathExtension == "app" {
+            let tool = bundle.appendingPathComponent("Contents/MacOS/apex-signal").path
+            return FileManager.default.isExecutableFile(atPath: tool) && bundleIsIntact(bundle) ? tool : nil
+        }
+        let tool = Bundle(for: Marker.self).bundleURL.deletingLastPathComponent().appendingPathComponent("ApexSignal").path
+        return FileManager.default.isExecutableFile(atPath: tool) ? tool : nil
+    }
+    private final class Marker {}
+
+    /// The app on disk is the one running, unmodified, nested code (the tool)
+    /// included. The requirement comes from the *running* code (its own
+    /// designated requirement plus its code hash, as the kernel has it), so a
+    /// bundle replaced on disk, even one signed again, doesn't pass.
+    static func bundleIsIntact(_ bundle: URL) -> Bool {
+        var me: SecCode?
+        guard SecCodeCopySelf([], &me) == errSecSuccess, let me else { return false }
+        let running = unsafeBitCast(me, to: SecStaticCode.self)      // a SecCode is a SecStaticCode
+        var info: CFDictionary?
+        guard SecCodeCopySigningInformation(running, SecCSFlags(rawValue: kSecCSDynamicInformation), &info) == errSecSuccess,
+              let hash = (info as? [String: Any])?[kSecCodeInfoUnique as String] as? Data else { return false }
+        var designated: SecRequirement?, designatedText: CFString?
+        guard SecCodeCopyDesignatedRequirement(running, [], &designated) == errSecSuccess, let designated,
+              SecRequirementCopyString(designated, [], &designatedText) == errSecSuccess, let designatedText else { return false }
+        let text = "(\(designatedText)) and cdhash H\"\(hash.map { String(format: "%02x", $0) }.joined())\""
+        var requirement: SecRequirement?
+        guard SecRequirementCreateWithString(text as CFString, [], &requirement) == errSecSuccess else { return false }
+        var code: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(bundle as CFURL, [], &code) == errSecSuccess, let code else { return false }
+        // The running slice only: each architecture of a universal app has its own code hash.
+        let flags = SecCSFlags(rawValue: kSecCSCheckNestedCode | kSecCSStrictValidate)
+        return SecStaticCodeCheckValidity(code, flags, requirement) == errSecSuccess
+    }
+
+    /// "pid@start result" lines → results. Unknown lines are ignored. Pure: tested.
+    static func parse(_ output: String) -> [ProcessIdentity: SignalResult] {
+        var out: [ProcessIdentity: SignalResult] = [:]
+        for line in output.split(separator: "\n") {
+            let f = line.split(separator: " ")
+            guard f.count == 2, let id = ProcessIdentity(argument: String(f[0])), let r = SignalResult(word: String(f[1])) else { continue }
+            out[id] = r
+        }
+        return out
     }
 }

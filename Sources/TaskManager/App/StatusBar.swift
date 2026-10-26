@@ -43,6 +43,26 @@ final class StatusBar: NSObject, NSPopoverDelegate {
         refreshLabel()
     }
 
+    /// Where the menu bar item is on screen; nil when Apex isn't in the menu bar.
+    var itemFrame: NSRect? {
+        guard let b = item?.button, let w = b.window, w.isVisible else { return nil }
+        let f = w.convertToScreen(b.convert(b.bounds, to: nil))
+        return f.isEmpty ? nil : f
+    }
+
+    /// A small nod from the menu bar item: something just went into it.
+    func bounce() {
+        guard let b = item?.button, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
+        b.wantsLayer = true
+        guard let layer = b.layer else { return }
+        let a = CAKeyframeAnimation(keyPath: "transform")
+        a.values = [1, 1.22, 0.94, 1].map { FloatingShelf.scaled($0, centreOf: layer) }
+        a.keyTimes = [0, 0.35, 0.7, 1]
+        a.duration = 0.32
+        a.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        layer.add(a, forKey: "bounce")
+    }
+
     @objc private func clicked(_ sender: NSStatusBarButton) {
         let clicks = NSApp.currentEvent?.clickCount ?? 1
         if clicks >= 3 {

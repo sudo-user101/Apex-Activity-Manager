@@ -33,13 +33,79 @@ enum MediaInfo {
         case .other: break
         }
         out.append(.init(label: "Format", value: UTType(filenameExtension: url.pathExtension)?.localizedDescription ?? url.pathExtension.uppercased()))
+        let v = try? url.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey])
+        if let d = v?.creationDate { out.append(.init(label: "Created", value: d.formatted(date: .abbreviated, time: .shortened))) }
+        if let d = v?.contentModificationDate { out.append(.init(label: "Modified", value: d.formatted(date: .abbreviated, time: .shortened))) }
         return out
     }
 
     static func image(_ url: URL) -> [Field] {
         guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
               let p = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] else { return [] }
-        return imageFields(p)
+        var out = imageFields(p)
+        // How much data each pixel gets: the clearest sign of how hard it's compressed.
+        if let w = p[kCGImagePropertyPixelWidth] as? Int, let h = p[kCGImagePropertyPixelHeight] as? Int, w * h > 0 {
+            let bpp = Double(MediaCompressor.fileSize(url)) * 8 / Double(w * h)
+            out.insert(.init(label: "Data per pixel", value: String(format: "%.2f bits", bpp)), at: min(2, out.count))
+        }
+        if CGImageSourceCopyAuxiliaryDataInfoAtIndex(src, 0, kCGImageAuxiliaryDataTypeHDRGainMap) != nil {
+            out.append(.init(label: "HDR", value: "Yes (brighter highlights on HDR screens)"))
+        }
+        let frames = CGImageSourceGetCount(src)
+        if frames > 1 { out.append(.init(label: "Frames", value: "\(frames)")) }
+        return out
+    }
+
+    /// How different the copy looks from the original, as peak signal-to-noise
+    /// ratio in dB (higher = closer; ∞ = identical), on both pictures scaled to
+    /// the same size. nil when either can't be read.
+    static func visibleChange(_ a: URL, _ b: URL) async -> Double? {
+        await Task.detached(priority: .userInitiated) {
+            guard let pa = pixels(a, size: nil), let pb = pixels(b, size: (pa.w, pa.h)) else { return nil }
+            return psnr(pa.data, pb.data)
+        }.value
+    }
+
+    /// RGBA pixels, at most 768 px on the long side (or exactly `size`).
+    private static func pixels(_ url: URL, size: (Int, Int)?) -> (data: [UInt8], w: Int, h: Int)? {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let img = CGImageSourceCreateThumbnailAtIndex(src, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true,
+                                                                     kCGImageSourceCreateThumbnailWithTransform: true,
+                                                                     kCGImageSourceThumbnailMaxPixelSize: 768] as CFDictionary)
+        else { return nil }
+        let (w, h) = size ?? (img.width, img.height)
+        var data = [UInt8](repeating: 0, count: w * h * 4)
+        let ok = data.withUnsafeMutableBytes { buf -> Bool in
+            guard let ctx = CGContext(data: buf.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                                      space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            else { return false }
+            ctx.interpolationQuality = .high
+            ctx.draw(img, in: CGRect(x: 0, y: 0, width: w, height: h))
+            return true
+        }
+        return ok ? (data, w, h) : nil
+    }
+
+    /// PSNR over the red, green and blue values of two same-size RGBA buffers. Pure: tested.
+    static func psnr(_ a: [UInt8], _ b: [UInt8]) -> Double? {
+        guard a.count == b.count, a.count >= 4 else { return nil }
+        var sum = 0.0, n = 0
+        for i in stride(from: 0, to: a.count, by: 4) {
+            for c in 0..<3 { let d = Double(a[i + c]) - Double(b[i + c]); sum += d * d }
+            n += 3
+        }
+        let mse = sum / Double(n)
+        return mse == 0 ? .infinity : 10 * log10(255 * 255 / mse)
+    }
+
+    /// PSNR → plain words. Pure: tested.
+    static func changeWords(_ db: Double) -> (title: String, detail: String, level: Int) {
+        switch db {
+        case 40...: return ("Looks the same", "No difference you’d notice, even zoomed in.", 0)
+        case 35..<40: return ("Hard to tell apart", "Tiny differences only when zoomed in closely.", 1)
+        case 30..<35: return ("Slight change", "Fine detail is a little softer if you look closely.", 2)
+        default: return ("Noticeable change", "You may see blur or blocks. Keep the original if quality matters.", 3)
+        }
     }
 
     /// Pure: tested.
@@ -52,7 +118,12 @@ enum MediaInfo {
             let depth = (p[kCGImagePropertyDepth] as? Int).map { ", \($0)-bit" } ?? ""
             out.append(.init(label: "Colour", value: model + depth))
         }
+        if let w = p[kCGImagePropertyPixelWidth] as? Int, let h = p[kCGImagePropertyPixelHeight] as? Int {
+            out.append(.init(label: "Megapixels", value: String(format: "%.1f MP", Double(w * h) / 1_000_000)))
+        }
         if let profile = p[kCGImagePropertyProfileName] as? String { out.append(.init(label: "Colour profile", value: profile)) }
+        if let alpha = p[kCGImagePropertyHasAlpha] as? Bool { out.append(.init(label: "Transparency", value: alpha ? "Yes" : "No")) }
+        if let o = p[kCGImagePropertyOrientation] as? Int, o != 1 { out.append(.init(label: "Orientation", value: "Rotated (\(o))")) }
         if let dpi = p[kCGImagePropertyDPIWidth] as? Double { out.append(.init(label: "Resolution", value: "\(Int(dpi)) dpi")) }
         let tiff = p[kCGImagePropertyTIFFDictionary] as? [CFString: Any] ?? [:]
         let exif = p[kCGImagePropertyExifDictionary] as? [CFString: Any] ?? [:]
@@ -67,6 +138,8 @@ enum MediaInfo {
         if let iso = (exif[kCGImagePropertyExifISOSpeedRatings] as? [Int])?.first { shot.append("ISO \(iso)") }
         if let fl = exif[kCGImagePropertyExifFocalLength] as? Double { shot.append("\(Int(fl)) mm") }
         if !shot.isEmpty { out.append(.init(label: "Settings", value: shot.joined(separator: " · "), detail: true)) }
+        if let flash = exif[kCGImagePropertyExifFlash] as? Int { out.append(.init(label: "Flash", value: flash & 1 == 1 ? "Fired" : "Off", detail: true)) }
+        if let wb = exif[kCGImagePropertyExifWhiteBalance] as? Int { out.append(.init(label: "White balance", value: wb == 0 ? "Auto" : "Manual", detail: true)) }
         if let d = exif[kCGImagePropertyExifDateTimeOriginal] as? String ?? tiff[kCGImagePropertyTIFFDateTime] as? String {
             out.append(.init(label: "Taken", value: d, detail: true))
         }

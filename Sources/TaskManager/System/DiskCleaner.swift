@@ -26,24 +26,34 @@ struct CleanCategory: Identifiable, Sendable {
 
     var title: String {
         switch kind {
-        case .caches: return "App caches"
-        case .logs: return "Logs"
-        case .developer: return "Developer caches"
-        case .leftovers: return "Leftovers from removed apps"
-        case .installers: return "Installers"
-        case .projects: return "Project build files"
+        case .caches: return "Temporary app files"
+        case .logs: return "App activity records"
+        case .developer: return "Software-building files"
+        case .leftovers: return "Leftovers from deleted apps"
+        case .installers: return "Old installers"
+        case .projects: return "Re-creatable project folders"
         case .trash: return "Trash"
         }
     }
+    /// What it is, in everyday words.
     var explanation: String {
         switch kind {
-        case .caches: return "Temporary files apps keep to load faster. Apps rebuild them as needed. Running apps are skipped."
-        case .logs: return "Diagnostic logs written by apps. Safe to remove."
-        case .developer: return "Xcode build data, simulator caches and package-manager caches (npm, pip, Homebrew, CocoaPods, Gradle, Go)."
-        case .leftovers: return "Settings and data left behind by apps you’ve already deleted."
-        case .installers: return "Disk images and installer packages in Downloads you probably don’t need any more."
-        case .projects: return "Rebuildable folders in your code projects: node_modules, build outputs and similar."
-        case .trash: return "Items already in the Trash. Emptying it can’t be undone."
+        case .caches: return "Copies apps make so they open faster. Apps simply make them again when they need them. Apps that are open are left alone."
+        case .logs: return "Notes apps keep about what they did, used for fixing problems. Nothing you made is in them."
+        case .developer: return "Only if you write software: build files and downloads that your tools make again by themselves."
+        case .leftovers: return "Settings and data from apps you’ve already deleted. If you plan to reinstall one of them, keep its folder."
+        case .installers: return "Setup files (.dmg, .pkg) in Downloads. Once an app is installed you don’t need them. Check there’s none you want to keep."
+        case .projects: return "Folders like node_modules in your code projects. They’re made again when you build the project."
+        case .trash: return "Files you’ve already thrown away. Emptying the Trash deletes them for good."
+        }
+    }
+    enum Safety { case safe, checkFirst, permanent }
+    /// How careful to be. Pure: tested.
+    var safety: Safety {
+        switch kind {
+        case .caches, .logs, .developer, .projects: return .safe
+        case .leftovers, .installers: return .checkFirst
+        case .trash: return .permanent
         }
     }
     var symbol: String {

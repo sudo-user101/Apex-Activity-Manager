@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import ProcessIdentityCore
 
 /// Enumerates processes straight from the kernel via libproc.
 ///
@@ -21,7 +22,7 @@ final class ProcessSampler {
     private var statics: [pid_t: Static] = [:]
     private var restricted: [pid_t: Restricted] = [:]
     private var restrictedTimes: [pid_t: RestrictedTimes] = [:]
-    private var startCache: [pid_t: UInt64] = [:]
+    private var startCache: [pid_t: Int64] = [:]
     private var restrictedTime: UInt64 = 0
     private var userNames: [uid_t: String] = [:]
     private var pidBuffer: [pid_t] = []
@@ -60,7 +61,7 @@ final class ProcessSampler {
             let ok = proc_pidinfo(pid, PROC_PIDTASKALLINFO, 0, &all, allSize) == allSize
 
             var uid: uid_t, ppid: pid_t, status: UInt32, comm: String
-            var nice: Int32 = 0, threads: Int32 = 0, started: UInt64 = 0
+            var nice: Int32 = 0, threads: Int32 = 0, started: UInt64 = 0, startedMicros: Int64 = 0
             var cpuU = 0.0, cpuS = 0.0, memory: UInt64 = 0, diskR = 0.0, diskW = 0.0
             var background = false
             var power = 0.0
@@ -71,6 +72,7 @@ final class ProcessSampler {
                 status = all.pbsd.pbi_status
                 nice = all.pbsd.pbi_nice
                 started = all.pbsd.pbi_start_tvsec
+                startedMicros = Int64(all.pbsd.pbi_start_tvsec) * 1_000_000 + Int64(all.pbsd.pbi_start_tvusec)
                 threads = all.ptinfo.pti_threadnum
                 // PROC_FLAG_DARWINBG (self) | PROC_FLAG_EXT_DARWINBG (set by another process).
                 background = (all.pbsd.pbi_flags & 0x18000) != 0
@@ -117,8 +119,9 @@ final class ProcessSampler {
                 ppid = pid_t(short.pbsi_ppid)
                 status = short.pbsi_status
                 comm = String(cTuple: short.pbsi_comm)
-                started = startCache[pid] ?? Self.startTime(pid)
-                startCache[pid] = started
+                startedMicros = startCache[pid] ?? Self.startTime(pid)
+                startCache[pid] = startedMicros
+                started = UInt64(max(0, startedMicros / 1_000_000))
                 restrictedPids.append(pid)
             }
 
@@ -129,6 +132,7 @@ final class ProcessSampler {
                                     diskR: diskR, diskW: diskW, background: background, st: st, restricted: !ok,
                                     regularApps: regularApps, netRates: netRates, gpuPercent: gpuPercent)
             sample.power = power
+            sample.startedMicros = startedMicros
             out.append(sample)
         }
         previous = nextPrevious
@@ -255,14 +259,10 @@ final class ProcessSampler {
         return result
     }
 
-    /// Start time (Unix seconds) via sysctl — readable for every process,
-    /// unlike libproc's task info for root / other users' processes.
-    static func startTime(_ pid: pid_t) -> UInt64 {
-        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
-        var info = kinfo_proc()
-        var size = MemoryLayout<kinfo_proc>.stride
-        guard sysctl(&mib, 4, &info, &size, nil, 0) == 0, size > 0 else { return 0 }
-        return UInt64(max(0, info.kp_proc.p_starttime.tv_sec))
+    /// Start time (microseconds since 1970) via sysctl — readable for every
+    /// process, unlike libproc's task info for root / other users' processes.
+    static func startTime(_ pid: pid_t) -> Int64 {
+        ProcessIdentity.current(pid)?.startMicros ?? 0
     }
 
     /// "[[dd-]hh:]mm:ss.cc" -> seconds

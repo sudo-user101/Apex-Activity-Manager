@@ -13,7 +13,7 @@ struct OnboardingView: View {
         ("gauge.with.dots.needle.33percent", "Performance", "CPU, memory, disk, cloud, network, GPU, display and energy, each with a doctor that explains problems in plain words and fixes them."),
         ("stethoscope", "Doctors", "Drive Doctor and Network Doctor check step by step and tell you what's wrong and what to do, safely."),
         ("menubar.rectangle", "Menu bar", "Live graphs, Stay Awake, a shelf for files, clipboard history and sessions. Click the icon three times to open Apex."),
-        ("sparkles", "Assistant", "Ask a model on your Mac about your Mac, with Apex's live readings. Nothing leaves the Mac."),
+        ("sparkles", "Assistant", "Ask about your Mac, with Apex's live readings: Apex Agent on this Mac, a local model, or any AI service with your own key."),
     ]
 
     var body: some View {

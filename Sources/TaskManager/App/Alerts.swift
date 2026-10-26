@@ -1,4 +1,5 @@
 import AppKit
+import ProcessIdentityCore
 import UserNotifications
 import DetectionCore
 
@@ -19,12 +20,12 @@ final class Alerts: NSObject, UNUserNotificationCenterDelegate {
     /// Whether macOS lets Apex show notifications (events are recorded either way).
     private(set) var authorized = false
     private var engine: DetectionEngine
-    private let center = UNUserNotificationCenter.current()
+    private lazy var center = UNUserNotificationCenter.current()   // lazy: not touched until used (tests have no app bundle)
 
     override init() {
         let s = Self.loadSettings()
         settings = s
-        engine = DetectionEngine(settings: s, formatValue: Self.format)
+        engine = DetectionEngine(settings: s, formatValue: { Self.format($0, $1) })
         super.init()
     }
 
@@ -135,7 +136,11 @@ final class Alerts: NSObject, UNUserNotificationCenterDelegate {
         case .diskSpace, .diskFilling, .driveHealth: c.categoryIdentifier = "disk"
         default: c.categoryIdentifier = ""
         }
-        c.userInfo = ["pids": e.pids.map(Int.init), "event": e.id.uuidString]
+        // Which processes, exactly (PID + start time): a Quit from this
+        // notification, maybe much later, acts on these and nothing else.
+        let targets = AppModel.shared.identities(e.pids).map(\.argument)
+        c.userInfo = ["pids": e.pids.map(Int.init), "targets": targets, "event": e.id.uuidString,
+                      "subject": e.subject ?? "", "title": e.title, "date": e.date.timeIntervalSince1970]
         c.sound = e.severity == .critical ? .defaultCritical : .default
         center.add(UNNotificationRequest(identifier: e.key, content: c, trigger: nil))
     }
@@ -144,13 +149,17 @@ final class Alerts: NSObject, UNUserNotificationCenterDelegate {
                                             withCompletionHandler done: @escaping () -> Void) {
         let action = response.actionIdentifier
         let info = response.notification.request.content.userInfo
-        let pids = (info["pids"] as? [Int])?.map { pid_t($0) } ?? []
+        let targets = (info["targets"] as? [String] ?? []).compactMap(ProcessIdentity.init(argument:))
+        let subject = (info["subject"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "the app"
+        let title = info["title"] as? String ?? ""
+        let raised = (info["date"] as? Double).map(Date.init(timeIntervalSince1970:))
         let event = (info["event"] as? String).flatMap(UUID.init)
         Task { @MainActor in
             let model = AppModel.shared
             switch action {
-            case "quit": model.end(pids: pids, force: false)
-            case "optimize": model.setOptimized(pids: pids, true)
+            case "quit": model.confirmEndFromAlert(targets, name: subject, alert: title, raised: raised)
+            // Only what's still the same process (an older alert has no targets: nothing).
+            case "optimize": model.setOptimized(pids: targets.filter { $0.check() == .same }.map(\.pid), true)
             case "free": model.openMainWindow?(); model.section = .performance; model.showFreeMemory = true
             case "clean": model.openMainWindow?(); model.showCleanup = true
             default:

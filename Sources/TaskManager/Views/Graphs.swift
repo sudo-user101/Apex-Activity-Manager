@@ -69,6 +69,9 @@ struct GraphSeries {
     var pointColors: [Color]? = nil
     /// Shown in the advanced graph's read-outs.
     var name: String = ""
+    /// Line width (nil: the default), and a flat translucent fill instead of the gradient.
+    var lineWidth: CGFloat? = nil
+    var flatFill: Double? = nil
 }
 
 /// A cheap, allocation-light line graph drawn with Canvas. The newest sample
@@ -111,8 +114,12 @@ struct LineGraph: View {
                     area.addLine(to: .init(x: xs[n - 1], y: h))
                     area.addLine(to: .init(x: xs[0], y: h))
                     area.closeSubpath()
-                    ctx.fill(area, with: .linearGradient(Gradient(colors: [s.color.opacity(0.35), s.color.opacity(0.08)]),
-                                                         startPoint: .zero, endPoint: CGPoint(x: 0, y: h)))
+                    if let o = s.flatFill {
+                        ctx.fill(area, with: .color(s.color.opacity(o)))
+                    } else {
+                        ctx.fill(area, with: .linearGradient(Gradient(colors: [s.color.opacity(0.35), s.color.opacity(0.08)]),
+                                                             startPoint: .zero, endPoint: CGPoint(x: 0, y: h)))
+                    }
                 }
                 if let pc = s.pointColors, pc.count == n {
                     // Draw each segment in the colour of its newer point.
@@ -121,10 +128,10 @@ struct LineGraph: View {
                         let x0 = xs[i - 1], x1 = xs[i]
                         seg.move(to: .init(x: x0, y: h - CGFloat(min(s.values[i - 1], top) / top) * h))
                         seg.addLine(to: .init(x: x1, y: h - CGFloat(min(s.values[i], top) / top) * h))
-                        ctx.stroke(seg, with: .color(pc[i]), style: StrokeStyle(lineWidth: 1.8, lineCap: .round))
+                        ctx.stroke(seg, with: .color(pc[i]), style: StrokeStyle(lineWidth: s.lineWidth ?? 1.8, lineCap: .round))
                     }
                 } else {
-                    ctx.stroke(line, with: .color(s.color), style: StrokeStyle(lineWidth: 1.3, lineJoin: .round))
+                    ctx.stroke(line, with: .color(s.color), style: StrokeStyle(lineWidth: s.lineWidth ?? 1.3, lineJoin: .round))
                 }
             }
         }

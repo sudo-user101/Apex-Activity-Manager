@@ -10,8 +10,9 @@ import Network
 enum CloudUpload {
     // MARK: Waiting files
 
-    /// `blocked`: held up by the connection (keeps waiting); `failed`: a real upload problem.
-    enum FileState: Equatable, Sendable { case uploaded, sending, queued, blocked(String), failed(String) }
+    /// `blocked`: held up by the connection (keeps waiting); `signedOut`: the
+    /// service's app needs signing in again (keeps waiting); `failed`: a real upload problem.
+    enum FileState: Equatable, Sendable { case uploaded, sending, queued, blocked(String), signedOut, failed(String) }
 
     /// Where each waiting file's upload is. Fresh URLs, so nothing is cached.
     /// Blocking: call off the main thread.
@@ -37,7 +38,7 @@ enum CloudUpload {
         case -1004: return .blocked("Can’t reach the server.")
         case -2005: return .blocked("The app couldn’t sync it yet (usually the connection).")
         case -1003: return .failed("Your cloud storage is full. Free some space online, or get more.")
-        case -1000: return .failed("Signed out. Sign in again in the service’s app.")
+        case -1000: return .signedOut
         case -1001: return .failed("A file with the same name is already there.")
         case -2010: return .failed("This file is set not to sync.")
         default: return .failed(text)
@@ -45,6 +46,40 @@ enum CloudUpload {
     }
 
     static let NSFileProviderErrorDomainName = "NSFileProviderErrorDomain"
+
+    // MARK: The service's own app
+
+    /// Why nothing can upload, whatever the connection: the service's app is
+    /// signed out, or isn't open.
+    enum AppProblem: Equatable, Sendable { case notOpen, signedOut }
+
+    /// Services synced by their own app (not iCloud, WebDAV or a plain folder).
+    static func hasOwnApp(_ s: CloudService) -> Bool { s.kind == .system && s.id != "icloud" }
+
+    /// A file macOS reports as "not signed in" means the whole service is;
+    /// otherwise, files waiting while the app isn't running can't move. Pure: tested.
+    static func appProblem(hasApp: Bool, running: Bool, states: [FileState]) -> AppProblem? {
+        if states.contains(.signedOut) { return .signedOut }
+        if hasApp, !running, states.contains(where: { $0 != .uploaded }) { return .notOpen }
+        return nil
+    }
+
+    /// Pure: tested.
+    static func appMessage(_ p: AppProblem, service name: String) -> String {
+        switch p {
+        case .signedOut: return "\(name) is signed out. Sign in again in the \(name) app and uploads carry on."
+        case .notOpen: return "\(name) isn’t open, so nothing can upload. Open it and uploads carry on."
+        }
+    }
+
+    /// The service's app on this Mac, to open it.
+    static func appURL(_ s: CloudService) -> URL? {
+        let names = [s.name, s.name.replacingOccurrences(of: " ", with: "")]
+        for dir in ["/Applications", NSHomeDirectory() + "/Applications"] {
+            for n in names where FileManager.default.fileExists(atPath: "\(dir)/\(n).app") { return URL(fileURLWithPath: "\(dir)/\(n).app") }
+        }
+        return nil
+    }
 
     /// Bytes the app sent for a file ÷ its size, never shown as done (the
     /// file's own "uploaded" flag says that). Pure: tested.
@@ -58,10 +93,13 @@ enum CloudUpload {
     enum Dot: Equatable, Sendable { case uploading, paused, failed(String) }
 
     /// Pure: tested.
-    static func dot(_ state: FileState, paused: Bool, serverDown: Bool) -> Dot? {
+    static func dot(_ state: FileState, paused: Bool, serverDown: Bool, app: AppProblem? = nil) -> Dot? {
         switch state {
         case .uploaded: return nil
         case .failed(let why): return .failed(why)
+        case .signedOut: return .failed("Signed out. Sign in again in the service’s app.")
+        // Its app isn't open: waiting, not uploading (no spinning ring).
+        case _ where app != nil: return .paused
         case .blocked(let why): return paused || serverDown ? .paused : .failed(why)
         // The service's app says it's sending this file right now: it's syncing,
         // whatever Apex's own check of the server found.

@@ -97,9 +97,9 @@ final class ParserTests: XCTestCase {
 final class StartTimeTests: XCTestCase {
     func testStartTimeReadableForRootProcess() {
         // launchd (pid 1) is root-owned; sysctl still reports when it started.
-        let t = ProcessSampler.startTime(1)
-        XCTAssertGreaterThan(t, 1_000_000_000)
-        XCTAssertLessThanOrEqual(Double(t), Date().timeIntervalSince1970)
+        let t = ProcessSampler.startTime(1)     // microseconds
+        XCTAssertGreaterThan(t, 1_000_000_000_000_000)
+        XCTAssertLessThanOrEqual(Double(t) / 1e6, Date().timeIntervalSince1970)
     }
 }
 

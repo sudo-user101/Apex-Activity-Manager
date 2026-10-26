@@ -21,6 +21,7 @@ final class FloatingShelf {
     private var baseline = 0
     private var shownForDrag = false
     private var itemsAtShow = 0
+    private var dropsAtShow = 0
     private var fileDrag = false
     private var shakeX = ShakeDetector()
     private var shakeY = ShakeDetector()
@@ -50,10 +51,14 @@ final class FloatingShelf {
         }) { monitors.append(m) }
         updateSideHandle()
         // Test switch: APEX_OPEN=shelf shows the floating shelf at launch (no drag needed).
-        if ["shelf", "shelfminimize"].contains(ProcessInfo.processInfo.environment["APEX_OPEN"] ?? "") {
+        if ["shelf", "shelfminimize", "shelftuck"].contains(ProcessInfo.processInfo.environment["APEX_OPEN"] ?? "") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
                 let f = NSScreen.main?.visibleFrame ?? .zero
                 FloatingShelf.shared.show(near: NSPoint(x: f.midX - 200, y: f.midY))
+            }
+            // APEX_OPEN=shelftuck: then into the menu bar, as after a drop elsewhere.
+            if ProcessInfo.processInfo.environment["APEX_OPEN"] == "shelftuck" {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3) { FloatingShelf.shared.tuckIntoMenuBar() }
             }
         }
     }
@@ -74,9 +79,8 @@ final class FloatingShelf {
     private func dragged(at time: TimeInterval) {
         if !fileDrag {
             let pb = NSPasteboard(name: .drag)
-            guard pb.changeCount != baseline,
-                  pb.types?.contains(.fileURL) == true || pb.types?.contains(.png) == true || pb.types?.contains(.tiff) == true
-            else { return }
+            // Anything a shelf can keep: files, promised files (Photos, Mail), pictures, links, text.
+            guard pb.changeCount != baseline, ShelfDrop.canAccept(pb) else { return }
             fileDrag = true
         }
         let point = NSEvent.mouseLocation
@@ -90,6 +94,9 @@ final class FloatingShelf {
             show(near: point)
             return
         }
+        // By default only a shake opens the shelf, so moving files around
+        // doesn't bring it up; Settings can open it on every drag instead.
+        guard UserDefaults.standard.bool(forKey: "shelfOnAnyDrag") else { return }
         guard !shownForDrag else { return }
         // Already up (or tucked at the edge): leave it; dragging onto the handle brings it out.
         if panel?.isVisible == true { return }
@@ -102,11 +109,12 @@ final class FloatingShelf {
         guard shownForDrag else { return }
         shownForDrag = false
         baseline = NSPasteboard(name: .drag).changeCount
-        // Give the drop a moment to land; keep the shelf up if something did.
+        // Give the drop a moment to land; keep the shelf up if something did, or
+        // if a drop is still arriving or didn't work (so its message can be read).
         let gen = generation
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
             guard gen == self.generation, !self.shownForDrag else { return }
-            if ShelfStore.shared.shown.items.count == self.itemsAtShow { self.close() }
+            if ShelfStore.shared.shown.items.count == self.itemsAtShow, ShelfDrop.drops == self.dropsAtShow { self.close() }
         }
     }
 
@@ -114,6 +122,7 @@ final class FloatingShelf {
         generation += 1
         startPendingShelf()
         itemsAtShow = ShelfStore.shared.shown.items.count
+        dropsAtShow = ShelfDrop.drops
         let p = panel ?? makePanel()
         panel = p
         let wasUp = p.isVisible && p.alphaValue > 0.5      // not while fading out
@@ -183,6 +192,91 @@ final class FloatingShelf {
                 s.handlePulse()
             }
         })
+    }
+
+    /// The floating shelf's own window (drags from it can tuck it away).
+    func owns(_ window: NSWindow?) -> Bool { window != nil && window === panel }
+
+    /// Files from the shelf were dropped into another app or a folder: the
+    /// shelf shrinks into Apex's menu bar item and is kept in the menu bar's
+    /// Shelf tab. Core Animation scales the content (no relayout) while the
+    /// panel glides there; the panel never takes focus, so it stays smooth
+    /// whichever app is in front or comes forward meanwhile. Without Apex in
+    /// the menu bar it goes to the side; with Reduce Motion it just fades.
+    func tuckIntoMenuBar() {
+        guard let p = panel, p.isVisible, !moving, let content = p.contentView else { return }
+        guard let target = StatusBar.shared.itemFrame else {
+            minimize { ShelfStore.shared.tuckAway(menuBar: false) }
+            return
+        }
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            minimize { ShelfStore.shared.tuckAway(menuBar: true) }
+            StatusBar.shared.bounce()
+            return
+        }
+        content.wantsLayer = true
+        guard let layer = content.layer else { minimize { ShelfStore.shared.tuckAway(menuBar: true) }; return }
+        let gen = generation
+        moving = true
+        p.hasShadow = false                     // the shadow wouldn't shrink with the content
+        // Above the menu bar for the flight, so it lands on Apex's item.
+        (p as? KeyablePanel)?.unconstrained = true
+        p.level = .popUpMenu
+        let from = p.frame
+        let scale = Self.tuckScale(from: from.size, to: target.size)
+        let curve = CAMediaTimingFunction(controlPoints: 0.45, 0, 0.15, 1)
+        let duration = 0.45
+
+        let shrink = CABasicAnimation(keyPath: "transform")
+        shrink.fromValue = CATransform3DIdentity
+        shrink.toValue = Self.scaled(scale, centreOf: layer)
+        let fade = CAKeyframeAnimation(keyPath: "opacity")
+        fade.values = [1, 1, 0]
+        fade.keyTimes = [0, 0.6, 1]
+        let group = CAAnimationGroup()
+        group.animations = [shrink, fade]
+        group.duration = duration
+        group.timingFunction = curve
+        group.fillMode = .forwards
+        group.isRemovedOnCompletion = false
+        layer.add(group, forKey: "tuck")
+
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = duration
+            ctx.timingFunction = curve
+            // The centre lands on the menu bar item (the content shrinks around it).
+            // (`setFrame`: a window's origin alone isn't animated through its animator.)
+            p.animator().setFrame(NSRect(x: target.midX - from.width / 2, y: target.midY - from.height / 2,
+                                         width: from.width, height: from.height), display: false)
+        }, completionHandler: {
+            MainActor.assumeIsolated {
+                let s = FloatingShelf.shared
+                if s.generation == gen { p.orderOut(nil); s.state.docked = false }
+                layer.removeAnimation(forKey: "tuck")
+                p.hasShadow = true
+                p.level = .floating
+                (p as? KeyablePanel)?.unconstrained = false
+                s.moving = false
+                ShelfStore.shared.tuckAway(menuBar: true)
+                s.updateSideHandle()
+                StatusBar.shared.bounce()
+            }
+        })
+    }
+
+    /// How small the shelf gets: about the menu bar item's size. Pure: tested.
+    nonisolated static func tuckScale(from: NSSize, to: NSSize) -> CGFloat {
+        guard from.width > 0, from.height > 0 else { return 0.1 }
+        return max(0.05, min(1, min(to.width / from.width, to.height / from.height)))
+    }
+
+    /// A scale about the layer's centre, whatever its anchor point.
+    static func scaled(_ s: CGFloat, centreOf layer: CALayer) -> CATransform3D {
+        let dx = (0.5 - layer.anchorPoint.x) * layer.bounds.width
+        let dy = (0.5 - layer.anchorPoint.y) * layer.bounds.height
+        var t = CATransform3DMakeTranslation(dx, dy, 0)
+        t = CATransform3DScale(t, s, s, 1)
+        return CATransform3DTranslate(t, -dx, -dy, 0)
     }
 
     /// Opens a side shelf or category in the shelf window, by the edge handle.
@@ -359,14 +453,20 @@ final class ShelfHandleState { var pulse = 0 }
 /// category), still without bringing Apex to the front.
 final class KeyablePanel: NSPanel {
     override var canBecomeKey: Bool { true }
+    /// While flying into the menu bar: macOS would stop it below the menu bar.
+    var unconstrained = false
+    override func constrainFrameRect(_ rect: NSRect, to screen: NSScreen?) -> NSRect {
+        unconstrained ? rect : super.constrainFrameRect(rect, to: screen)
+    }
 }
 
-/// Spots a wiggle along one axis: the pointer changing direction 3 times,
-/// each stroke at least 24 pt, within 0.9 s. Small jitters don't count, and
-/// a stroke can run on as far as it likes before turning. Pure: tested.
+/// Spots a shake along one axis: the pointer changing direction 3 times,
+/// each stroke at least 40 pt, within 0.7 s. Re-aiming at a folder, small
+/// jitters and slow back-and-forth don't count; a stroke can run on as far
+/// as it likes before turning. Pure: tested.
 struct ShakeDetector {
-    static let minStroke: CGFloat = 24
-    static let window: TimeInterval = 0.9
+    static let minStroke: CGFloat = 40
+    static let window: TimeInterval = 0.7
     static let turnsNeeded = 3
 
     private var extreme: CGFloat?     // farthest point of the current stroke
@@ -429,7 +529,7 @@ private struct FloatingShelfContent: View {
                 .frame(maxHeight: .infinity)
                 .contentShape(Rectangle())
                 .onTapGesture { FloatingShelf.shared.dock(false) }
-                .onDrop(of: [.fileURL, .image], isTargeted: $targeted) { _ in false }
+                .onDrop(of: ShelfDrop.types, isTargeted: $targeted) { _ in false }
                 .onChange(of: targeted) { _, on in if on { FloatingShelf.shared.dock(false) } }
                 .help("Shelf: click, or drag a file here, to bring it back")
             }

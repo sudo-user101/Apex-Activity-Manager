@@ -25,6 +25,8 @@ final class CloudStore {
     private(set) var fileStates: [String: CloudUpload.FileState] = [:]
     /// The service's server didn't answer the last check.
     private(set) var serverDown: [String: Bool] = [:]
+    /// The service's own app is signed out or not open (nothing can upload).
+    private(set) var appProblem: [String: CloudUpload.AppProblem] = [:]
     /// The service's app is syncing right now (a listed file is going up, or its app is sending).
     private(set) var syncing: [String: Bool] = [:]
     @ObservationIgnored private var appBytes: [String: [String: UInt64]] = [:]
@@ -56,6 +58,7 @@ final class CloudStore {
         var checkedServer = false
         var downSince: Date?
         var networkHint: String?             // why it can't be reached, when Apex can tell
+        var appProblem: CloudUpload.AppProblem?   // its app is signed out or not open
         var stalled = false
         var stopped = false
         var paused = false
@@ -296,9 +299,11 @@ final class CloudStore {
         let states = await Task.detached(priority: .utility) { CloudUpload.states(list) }.value
         for (f, st) in zip(list, states) where fileStates[f.path] != st { fileStates[f.path] = st }
         // Syncing, as the service's own app sees it: a file it's sending, or its app sending data.
-        let sendingNow = await Task.detached(priority: .utility) { () -> [NetConnection] in
-            CloudUpload.connections(CloudUpload.processes(for: s))
+        let (appPids, sendingNow) = await Task.detached(priority: .utility) { () -> ([pid_t], [NetConnection]) in
+            let p = CloudUpload.processes(for: s)
+            return (p, CloudUpload.connections(p))
         }.value
+        setAppProblem(s, CloudUpload.appProblem(hasApp: CloudUpload.hasOwnApp(s), running: !appPids.isEmpty, states: states))
         let sent = CloudUpload.sent(sendingNow, previous: appBytes[s.id])
         appBytes[s.id] = Dictionary(sendingNow.map { ($0.key, $0.bytesOut) }, uniquingKeysWith: max)
         let sendingFiles = zip(list, states).filter { $0.1 == .sending }.map(\.0)
@@ -316,6 +321,16 @@ final class CloudStore {
         } else if Date().timeIntervalSince(lastServerCheck[s.id] ?? .distantPast) >= 30, let e = CloudUpload.knownServer(for: s) {
             lastServerCheck[s.id] = Date()
             serverDown[s.id] = await CloudUpload.probe(e) == nil
+        }
+    }
+
+    private func setAppProblem(_ s: CloudService, _ p: CloudUpload.AppProblem?) {
+        if appProblem[s.id] != p { appProblem[s.id] = p }
+        guard offload[s.id] != nil, offload[s.id]?.appProblem != p else { return }
+        let was = offload[s.id]?.appProblem
+        offload[s.id]?.appProblem = p
+        if p == nil, was != nil, offload[s.id]?.running == true {
+            offload[s.id]?.resumeNote = was == .signedOut ? "\(s.name) is signed in again, so uploads carry on." : "\(s.name) is open again, so uploads carry on."
         }
     }
 
@@ -404,7 +419,7 @@ final class CloudStore {
                 case .uploaded: ready.append(f)
                 case .sending: sending += 1; next.append(f)
                 case .queued: next.append(f)
-                case .blocked: next.append(f)             // the connection: keep waiting
+                case .blocked, .signedOut: next.append(f)  // the connection, or signing in: keep waiting
                 case .failed(let e): offload[id]?.failed += 1; offload[id]?.lastError = e; offload[id]?.failedFiles[f.name] = e
                 }
             }
@@ -422,7 +437,8 @@ final class CloudStore {
             offload[id]?.sendingNow = sending
             offload[id]?.waitingBytes = pending.reduce(0) { $0 + $1.bytes }
             // The app's connections: speed and server.
-            if now.timeIntervalSince(pidsAt) > 30 { pids = await Task.detached(priority: .utility) { CloudUpload.processes(for: s) }.value; pidsAt = now }
+            // Every 30 s, or every time while its app isn't running (to see it open).
+            if now.timeIntervalSince(pidsAt) > 30 || pids.isEmpty { pids = await Task.detached(priority: .utility) { CloudUpload.processes(for: s) }.value; pidsAt = now }
             let ps = pids
             let conns = await Task.detached(priority: .utility) { CloudUpload.connections(ps) }.value
             if !pids.isEmpty {
@@ -438,6 +454,9 @@ final class CloudStore {
                 lastBytes = Dictionary(conns.map { ($0.key, $0.bytesOut) }, uniquingKeysWith: max)
             }
             lastTick = now
+            let problem = CloudUpload.appProblem(hasApp: CloudUpload.hasOwnApp(s), running: !pids.isEmpty, states: states)
+            setAppProblem(s, problem)
+            if problem != nil { lastProgress = now }      // waits for you to sign in or open it, however long
             if let seen = CloudUpload.server(conns) { endpoint = seen }
             // Is the server there?
             if let e = endpoint, now.timeIntervalSince(lastProbe) >= 10 {
@@ -650,6 +669,10 @@ struct CloudDetail: View {
             .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
             .animation(.easeInOut(duration: 0.25), value: st?.waiting ?? 0 > 0)
         }
+        if let p = store.appProblem[s.id] {
+            AppProblemBanner(problem: p, service: s)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+        }
         // Paused: the short line in the card above says it all; the monitor comes back on Resume.
         // Stays up while it runs (paused, or with files that failed), so it still says what's going on.
         if let st = store.offload[s.id], st.running, st.uploadingSince != nil, st.waiting + st.failed > 0 {
@@ -677,7 +700,8 @@ struct CloudDetail: View {
                                 Text(f.name).lineLimit(1).truncationMode(.middle)
                                 if let dot = CloudUpload.dot(store.fileStates[f.path] ?? (f.uploading ? .queued : .uploaded),
                                                              paused: store.offload[s.id]?.paused == true,
-                                                             serverDown: store.serverDown[s.id] == true) {
+                                                             serverDown: store.serverDown[s.id] == true,
+                                                             app: store.appProblem[s.id]) {
                                     UploadDot(dot: dot, service: s.name, server: CloudUpload.knownServer(for: s)?.host,
                                               progress: store.uploadProgress[f.path])
                                 }
@@ -898,6 +922,26 @@ private struct AddCloudSheet: View {
     }
 }
 
+/// The service's app is signed out or not open: say so, with a button to open it.
+struct AppProblemBanner: View {
+    let problem: CloudUpload.AppProblem
+    let service: CloudService
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: problem == .signedOut ? "person.crop.circle.badge.exclamationmark" : "app.badge")
+                .font(.title3).foregroundStyle(.orange)
+            Text(CloudUpload.appMessage(problem, service: service.name)).font(.callout).fixedSize(horizontal: false, vertical: true)
+            Spacer()
+            if let url = CloudUpload.appURL(service) {
+                Button("Open \(service.name)") { NSWorkspace.shared.openApplication(at: url, configuration: .init()) }
+            }
+        }
+        .padding(12)
+        .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+    }
+}
+
 /// Words for the offload card. Pure: tested.
 enum OffloadText {
     static func lastRun(_ st: CloudStore.OffloadState) -> String {
@@ -956,8 +1000,10 @@ struct UploadMonitor: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline) {
-                Label(state.paused ? "Uploads to \(service) · paused" : "Uploading to \(service)",
-                      systemImage: state.paused ? "pause.circle" : "arrow.up.circle").font(.headline)
+                Label(state.paused ? "Uploads to \(service) · paused"
+                      : state.appProblem == .signedOut ? "Uploads to \(service) · signed out"
+                      : state.appProblem == .notOpen ? "Uploads to \(service) · app not open" : "Uploading to \(service)",
+                      systemImage: state.paused ? "pause.circle" : state.appProblem != nil ? "exclamationmark.circle" : "arrow.up.circle").font(.headline)
                     .contentTransition(.opacity)
                 Spacer()
                 TimelineView(.periodic(from: .now, by: 1)) { ctx in
@@ -990,7 +1036,8 @@ struct UploadMonitor: View {
                     if state.failedFiles.count > 5 { Text("and \(state.failedFiles.count - 5) more").font(.caption).foregroundStyle(.secondary) }
                 }
             }
-            Text(state.paused ? "Paused: Apex isn’t reading the upload speed." : OffloadText.speed(state))
+            Text(state.paused ? "Paused: Apex isn’t reading the upload speed."
+                 : state.appProblem != nil ? "Nothing can go up until then. Apex keeps waiting." : OffloadText.speed(state))
                 .font(.caption).foregroundStyle(.secondary).monospacedDigit()
             if let note = state.resumeNote, !state.paused {
                 Label(note, systemImage: "play.circle.fill").font(.caption).foregroundStyle(.green)

@@ -12,6 +12,8 @@ struct ShelfLibrary: View {
     private let store = ShelfStore.shared
     @State private var renaming: UUID?
     @State private var newName = ""
+    @State private var styling: UUID?
+    @State private var creating = false
 
     var body: some View {
         let recent = Array(store.shelves.dropFirst()).filter { !$0.items.isEmpty }
@@ -26,71 +28,123 @@ struct ShelfLibrary: View {
                     }
                     .frame(maxWidth: .infinity).padding(.vertical, 20)
                 }
-                if !store.categories.isEmpty {
-                    section("Categories") {
-                        ForEach(store.categories) { c in
-                            row(c, title: c.name ?? "Category", symbol: "folder.fill") { onOpen(.category(c.id)) }
-                                .dropDestination(for: URL.self) { urls, _ in store.add(urls, to: .category(c.id)); return true }
-                                .contextMenu {
-                                    Button("Rename…") { newName = c.name ?? ""; renaming = c.id }
-                                    Button("Delete Category", role: .destructive) { store.deleteCategory(c.id) }
-                                }
-                                .popover(isPresented: Binding(get: { renaming == c.id }, set: { if !$0 { renaming = nil } })) {
-                                    NameField(title: "Rename category", name: $newName, action: "Rename") {
-                                        store.renameCategory(c.id, to: newName); renaming = nil
-                                    }
-                                }
+                section("Categories", trailing: {
+                    Button { newName = ""; creating = true } label: { Label("New", systemImage: "plus") }
+                        .buttonStyle(.borderless).font(.caption)
+                        .help("A category of its own (e.g. Work), which can keep its own icon in the menu bar")
+                        .popover(isPresented: $creating) {
+                            NameField(title: "New category", name: $newName, action: "Create") {
+                                let id = store.addCategory(named: newName); creating = false
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { styling = id }
+                            }
                         }
+                }) {
+                    if store.categories.isEmpty {
+                        Text("Group files you keep coming back to, like Work or Receipts.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    ForEach(store.categories) { c in
+                        row(c, title: c.displayName, symbol: c.symbol, tint: ShelfLook.color(c.color), pinned: c.pinned == true) { onOpen(.category(c.id)) }
+                            .dropDestination(for: URL.self) { urls, _ in store.add(urls, to: .category(c.id)); return true }
+                            .contextMenu {
+                                Button("Rename…") { newName = c.name ?? ""; renaming = c.id }
+                                Button("Icon and Colour…") { styling = c.id }
+                                Button(c.pinned == true ? "Remove from Menu Bar" : store.canPinMore ? "Keep in Menu Bar" : "Keep in Menu Bar (up to \(ShelfStore.maxPinned))") { store.setPinned(c.id, c.pinned != true) }
+                                    .disabled(c.pinned != true && !store.canPinMore)
+                                Divider()
+                                Button("Delete Category", role: .destructive) { store.deleteCategory(c.id) }
+                            }
+                            .popover(isPresented: Binding(get: { renaming == c.id }, set: { if !$0 { renaming = nil } })) {
+                                NameField(title: "Rename category", name: $newName, action: "Rename") {
+                                    store.renameCategory(c.id, to: newName); renaming = nil
+                                }
+                            }
+                            .popover(isPresented: Binding(get: { styling == c.id }, set: { if !$0 { styling = nil } })) {
+                                ShelfLookPicker(id: c.id)
+                            }
                     }
                 }
                 if !store.menuBarShelves.isEmpty {
                     section("In the menu bar") {
                         ForEach(store.menuBarShelves) { s in
-                            row(s, title: s.count, symbol: "menubar.rectangle") { onOpen(.side(s.id)) }
+                            row(s, title: s.displayName, symbol: "menubar.rectangle") { onOpen(.side(s.id)) }
                                 .dropDestination(for: URL.self) { urls, _ in store.add(urls, to: .side(s.id)); return true }
-                                .contextMenu { Button("Remove", role: .destructive) { store.removeSide(s.id) } }
+                                .contextMenu {
+                                    Button("Rename…") { newName = s.name ?? ""; renaming = s.id }
+                                    Button("Remove", role: .destructive) { store.removeSide(s.id) }
+                                }
+                                .popover(isPresented: Binding(get: { renaming == s.id }, set: { if !$0 { renaming = nil } })) {
+                                    NameField(title: "Name this shelf", name: $newName, action: "Rename") {
+                                        store.renameCategory(s.id, to: newName); renaming = nil
+                                    }
+                                }
                         }
                     }
                 }
                 if !store.edgeShelves.isEmpty {
                     section("To the side") {
                         ForEach(store.edgeShelves) { s in
-                            row(s, title: s.count, symbol: "sidebar.right") { onOpen(.side(s.id)) }
+                            row(s, title: s.displayName, symbol: "sidebar.right") { onOpen(.side(s.id)) }
                                 .dropDestination(for: URL.self) { urls, _ in store.add(urls, to: .side(s.id)); return true }
-                                .contextMenu { Button("Remove", role: .destructive) { store.removeSide(s.id) } }
+                                .contextMenu {
+                                    Button("Rename…") { newName = s.name ?? ""; renaming = s.id }
+                                    Button("Remove", role: .destructive) { store.removeSide(s.id) }
+                                }
+                                .popover(isPresented: Binding(get: { renaming == s.id }, set: { if !$0 { renaming = nil } })) {
+                                    NameField(title: "Name this shelf", name: $newName, action: "Rename") {
+                                        store.renameCategory(s.id, to: newName); renaming = nil
+                                    }
+                                }
                         }
                     }
                 }
                 if !recent.isEmpty {
                     section("Recent") {
-                        ForEach(recent) { s in
-                            row(s, title: s.title, symbol: "clock") { onRestoreRecent(s) }
+                        LazyVStack(spacing: 6) {
+                            ForEach(recent) { s in
+                                row(s, title: s.displayName, symbol: "clock",
+                                    subtitle: s.created.formatted(.relative(presentation: .named)) + " · " + s.count) { onRestoreRecent(s) }
+                                    .contextMenu { Button("Remove", role: .destructive) { store.removeRecent(s.id) } }
+                            }
                         }
+                        Button("Clear Recent Shelves") { store.clearRecent() }
+                            .buttonStyle(.link).font(.caption)
+                            .help("Takes them off this list. The files themselves stay where they are.")
                     }
                 }
             }
             .padding(12)
         }
-        .frame(width: 300)
-        .frame(maxHeight: 420)
+        .frame(width: 340)
+        .frame(maxHeight: 460)
         .animation(.easeInOut(duration: 0.2), value: store.categories.map(\.id) + store.side.map(\.id))
     }
 
-    private func section(_ title: String, @ViewBuilder _ content: () -> some View) -> some View {
+    private func section(_ title: String, @ViewBuilder trailing: () -> some View = { EmptyView() }, @ViewBuilder _ content: () -> some View) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(title.uppercased()).font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+            HStack {
+                Text(title.uppercased()).font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                Spacer()
+                trailing()
+            }
             content()
         }
     }
 
     /// A row: up to four thumbnails of what's on it, its name and how many.
-    private func row(_ s: ShelfSet, title: String, symbol: String, open: @escaping () -> Void) -> some View {
+    private func row(_ s: ShelfSet, title: String, symbol: String, tint: Color? = nil, pinned: Bool = false,
+                     subtitle: String? = nil, open: @escaping () -> Void) -> some View {
         Button(action: open) {
             HStack(spacing: 10) {
-                ShelfPreview(items: s.items).frame(width: 92, height: 44)
+                ShelfPreview(items: s.items).frame(width: 52, height: 44)
                 VStack(alignment: .leading, spacing: 2) {
-                    Label(title, systemImage: symbol).font(.callout.weight(.medium)).lineLimit(1)
-                    Text(s.items.prefix(3).map(\.name).joined(separator: ", "))
+                    HStack(spacing: 5) {
+                        Image(systemName: symbol).foregroundStyle(tint ?? .secondary).frame(width: 16)
+                        Text(title).lineLimit(1)
+                        if pinned { Image(systemName: "menubar.arrow.up.rectangle").font(.caption2).foregroundStyle(.secondary).help("In the menu bar") }
+                    }
+                    .font(.callout.weight(.medium))
+                    Text(subtitle ?? s.items.prefix(3).map(\.name).joined(separator: ", "))
                         .font(.caption2).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
                 }
                 Spacer(minLength: 0)
@@ -105,27 +159,32 @@ struct ShelfLibrary: View {
     }
 }
 
-/// Up to four overlapping thumbnails, like a small fanned stack.
+/// Up to three thumbnails piled behind each other, like the shelf's own
+/// stack (not side by side), sized to the space it's given.
 struct ShelfPreview: View {
     let items: [ShelfItem]
 
     var body: some View {
-        ZStack(alignment: .leading) {
-            if items.isEmpty {
-                RoundedRectangle(cornerRadius: 7).strokeBorder(Color.white.opacity(0.15), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
-                    .frame(width: 40, height: 40)
+        GeometryReader { g in
+            let side = max(12, min(g.size.height, g.size.width) - 6)
+            let radius = max(4, side * 0.18)
+            ZStack {
+                if items.isEmpty {
+                    RoundedRectangle(cornerRadius: radius).strokeBorder(Color.white.opacity(0.15), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                        .frame(width: side, height: side)
+                }
+                ForEach(Array(items.prefix(3).enumerated().reversed()), id: \.element.id) { i, item in
+                    ShelfThumbnail(url: item.url)
+                        .frame(width: side, height: side)
+                        .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous).strokeBorder(Color.white.opacity(0.18), lineWidth: 0.5))
+                        .shadow(color: .black.opacity(0.3), radius: 1.5, y: 1)
+                        .rotationEffect(.degrees(ShelfStackView.angle(i, count: min(3, items.count))))
+                        .offset(x: CGFloat(i) * side * 0.06, y: CGFloat(i) * -side * 0.03)
+                }
             }
-            ForEach(Array(items.prefix(4).enumerated()), id: \.element.id) { i, item in
-                ShelfThumbnail(url: item.url)
-                    .frame(width: 40, height: 40)
-                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(Color.black.opacity(0.35), lineWidth: 1))
-                    .shadow(color: .black.opacity(0.25), radius: 2, x: 1, y: 0)
-                    .offset(x: CGFloat(i) * 17)
-                    .zIndex(Double(4 - i))
-            }
+            .frame(width: g.size.width, height: g.size.height)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -178,7 +237,7 @@ struct ShelfSideHandle: View {
         .scaleEffect(bump ? 1.12 : 1, anchor: .trailing)
         .contentShape(Rectangle())
         .onTapGesture { showing.toggle() }
-        .onDrop(of: [.fileURL], isTargeted: $targeted) { _ in false }
+        .onDrop(of: ShelfDrop.types, isTargeted: $targeted) { _ in false }
         .onChange(of: targeted) { _, on in if on { showing = true } }
         .onChange(of: state.pulse) {
             withAnimation(.spring(response: 0.25, dampingFraction: 0.5)) { bump = true }
@@ -263,7 +322,7 @@ struct ShelfMinimizeButton: View {
                 if preview.isEmpty {
                     Image(systemName: symbol).frame(width: 18).foregroundStyle(Color.accentColor)
                 } else {
-                    ShelfPreview(items: preview).frame(width: 60, height: 30).scaleEffect(0.75, anchor: .leading)
+                    ShelfPreview(items: preview).frame(width: 34, height: 30)
                 }
                 VStack(alignment: .leading, spacing: 1) {
                     Text(title).font(.callout.weight(.medium))

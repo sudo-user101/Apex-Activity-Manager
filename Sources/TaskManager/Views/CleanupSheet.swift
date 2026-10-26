@@ -27,7 +27,11 @@ struct CleanView: View {
                 Text("\(Fmt.diskBytes(model.snapshot.system.disk.available)) available")
                     .foregroundStyle(.secondary).monospacedDigit()
             }
-            Text("Review what’s found, untick anything you want to keep, then move it to the Trash. Nothing is deleted until you empty the Trash.")
+            let safe = categories.filter { $0.safety == .safe }.reduce(0) { $0 + $1.size }
+            Text(scanning ? "Looking for space you can get back…"
+                 : "You can safely get back \(Fmt.diskBytes(safe)). Your own files (documents, photos, music, anything you made) are never included.")
+                .font(.callout.weight(.medium)).fixedSize(horizontal: false, vertical: true)
+            Text("Tick what you want to clear. Everything goes to the Trash first, so you can still get it back.")
                 .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             if let result { Label(result, systemImage: "checkmark.circle.fill").foregroundStyle(.green) }
 
@@ -50,9 +54,10 @@ struct CleanView: View {
                 Button("Rescan") { Task { await scan() } }.disabled(scanning || working)
                 Spacer()
                 Button("Done") { onDone() }
-                Button("Move \(chosen.count) Item\(chosen.count == 1 ? "" : "s") to Trash · \(Fmt.diskBytes(chosenSize))") {
+                Button(chosen.isEmpty ? "Free Up Space" : "Free Up \(Fmt.diskBytes(chosenSize))") {
                     clean(chosen)
                 }
+                .help("Moves \(chosen.count) item\(chosen.count == 1 ? "" : "s") to the Trash. Nothing is deleted until you empty the Trash.")
                 .keyboardShortcut(.defaultAction)
                 .buttonStyle(.borderedProminent)
                 .disabled(chosen.isEmpty || scanning || working)
@@ -75,7 +80,10 @@ struct CleanView: View {
                 }
                 Image(systemName: cat.symbol).frame(width: 20).foregroundStyle(.tint)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(cat.title).fontWeight(.medium)
+                    HStack(spacing: 6) {
+                        Text(cat.title).fontWeight(.medium)
+                        safetyLabel(cat.safety)
+                    }
                     Text(cat.explanation).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer()
@@ -123,6 +131,17 @@ struct CleanView: View {
         .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 8))
     }
 
+    private func safetyLabel(_ s: CleanCategory.Safety) -> some View {
+        let (text, color): (String, Color) = switch s {
+        case .safe: ("Safe to clear", .green)
+        case .checkFirst: ("Check first", .orange)
+        case .permanent: ("Can’t be undone", .red)
+        }
+        return Text(text).font(.caption2.weight(.semibold)).foregroundStyle(color)
+            .padding(.horizontal, 6).padding(.vertical, 1)
+            .background(color.opacity(0.15), in: Capsule())
+    }
+
     private func scan() async {
         scanning = true
         categories = []
@@ -139,7 +158,8 @@ struct CleanView: View {
         working = true
         Task {
             let (freed, failed) = await Task.detached(priority: .userInitiated) { DiskCleaner.trash(items) }.value
-            result = "Moved \(Fmt.diskBytes(freed)) to the Trash." + (failed.isEmpty ? "" : " \(failed.count) item\(failed.count == 1 ? "" : "s") couldn’t be moved (in use or protected).")
+            result = "Freed \(Fmt.diskBytes(freed)). Nothing personal was removed. It’s in the Trash if you change your mind."
+                + (failed.isEmpty ? "" : " \(failed.count) item\(failed.count == 1 ? " was" : "s were") in use and left alone.")
             working = false
             await scan()
             if let r = result { result = r }

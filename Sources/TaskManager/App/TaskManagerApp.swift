@@ -16,6 +16,20 @@ struct TaskManagerApp: App {
         .defaultSize(width: 1240, height: 760)
         .commands { AppCommands(model: model) }
 
+        // Shell, popped out of the Network page into its own window.
+        Window("Shell", id: "shell") {
+            ShellView(inWindow: true)
+        }
+        .defaultSize(width: 920, height: 640)
+
+        // Assistant, in its own glass window.
+        Window("Assistant", id: "assistant") {
+            AssistantView(inWindow: true)
+                .environment(model)
+        }
+        .windowStyle(.hiddenTitleBar)
+        .defaultSize(width: 780, height: 800)
+
         Settings {
             SettingsView()
                 .environment(model)
@@ -25,6 +39,12 @@ struct TaskManagerApp: App {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Test switch: APEX_CHECK=signaltool reports whether the administrator
+        // tool would be used (bundle signature checked) and quits.
+        if ProcessInfo.processInfo.environment["APEX_CHECK"] == "signaltool" {
+            FileHandle.standardError.write(Data("signaltool: \(SignalTool.path() ?? "refused")\n".utf8))
+            exit(SignalTool.path() == nil ? 1 : 0)
+        }
         MainActor.assumeIsolated {
             AppModel.shared.start()
             Alerts.shared.start()
@@ -33,8 +53,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             StatusBar.shared.update()
             ClipboardHistory.shared.start()
             FloatingShelf.shared.start()
+            PinnedShelves.shared.start()
             LidAwake.shared.start()
             DisplayStore.shared.reload()      // the Display card's arrangement; refreshed when displays change
+        }
+        // Test switches: APEX_OPEN=settings opens Settings at launch (APEX_SETTINGS_TAB picks the tab);
+        // the assistant ones need the app in front so its main window opens the assistant.
+        let open = ProcessInfo.processInfo.environment["APEX_OPEN"] ?? ""
+        if ["assistant", "assistantkeys"].contains(open) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { NSApp.activate(ignoringOtherApps: true) }
+        }
+        if open == "settings" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                NSApp.activate(ignoringOtherApps: true)
+                // The app menu's own Settings… item (⌘,).
+                if let menu = NSApp.mainMenu?.items.first?.submenu,
+                   let i = menu.items.firstIndex(where: { $0.keyEquivalent == "," }) { menu.performActionForItem(at: i) }
+            }
         }
     }
 
@@ -60,6 +95,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 struct AppCommands: Commands {
     let model: AppModel
+    @Environment(\.openWindow) private var openWindow
 
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
@@ -70,6 +106,7 @@ struct AppCommands: Commands {
             ForEach(Array(AppSection.allCases.enumerated()), id: \.element) { i, s in
                 Button(s.title) { model.section = s }
                     .keyboardShortcut(KeyEquivalent(Character(String(i + 1))))
+                    .disabled(s == .report && model.target.isMac)
             }
             Divider()
             Picker("Show Processes", selection: Binding(get: { model.processFilter }, set: { model.processFilter = $0 })) {
@@ -82,6 +119,11 @@ struct AppCommands: Commands {
                 Text("Normally (5s)").tag(5.0)
                 Text("Rarely (10s)").tag(10.0)
             }
+            Divider()
+        }
+        CommandGroup(before: .windowArrangement) {
+            Button("Assistant") { openWindow(id: "assistant") }
+                .keyboardShortcut("a", modifiers: [.command, .shift])
             Divider()
         }
         CommandGroup(replacing: .help) {
@@ -99,6 +141,8 @@ struct AppCommands: Commands {
                 .disabled(model.selectedPIDs.isEmpty)
             Button("What’s Using a File or Disk…") { model.showWhoIsUsing = true }
                 .keyboardShortcut("u", modifiers: [.command, .shift])
+            Button("Census: What’s Using the Most…") { model.showCensus = true }
+                .keyboardShortcut("k", modifiers: [.command, .shift])
             Button(Recorder.shared.isRecording(.all) ? "Stop Recording" : "Start Recording") { Recorder.shared.toggle(.all) }
                 .keyboardShortcut("r", modifiers: [.command, .option])
             Divider()
@@ -113,124 +157,5 @@ struct AppCommands: Commands {
             .keyboardShortcut("r")
             .disabled(model.selectedPIDs.isEmpty)
         }
-    }
-}
-
-struct AlertSettings: View {
-    @State private var s = Alerts.shared.settings
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text("When an app uses over")
-                Picker("", selection: $s.cpuThreshold) { ForEach([50.0, 80, 100, 150, 200], id: \.self) { Text("\(Int($0))%").tag($0) } }
-                    .labelsHidden().fixedSize()
-                Text("CPU for")
-                Picker("", selection: $s.cpuMinutes) { ForEach([1.0, 3, 5, 10], id: \.self) { Text(Fmt.duration($0 * 60)).tag($0) } }
-                    .labelsHidden().fixedSize()
-            }
-            Toggle("When memory runs critically low", isOn: $s.memory)
-            Toggle("When an app’s memory keeps growing, or swap grows fast", isOn: $s.memoryGrowth)
-            Toggle("When your Mac is running hot", isOn: $s.heat)
-            Toggle("When your disk is almost full or filling up fast", isOn: $s.disk)
-            Toggle("Record heavy disk writing in History", isOn: $s.diskWrites)
-            HStack {
-                Toggle("Record network traffic over", isOn: $s.network)
-                Picker("", selection: $s.networkThreshold) {
-                    ForEach([1_000_000.0, 5_000_000, 10_000_000, 50_000_000], id: \.self) { Text(Fmt.rate($0)).tag($0) }
-                }
-                .labelsHidden().fixedSize().disabled(!s.network)
-                Text("for").foregroundStyle(s.network ? .primary : .secondary)
-                Picker("", selection: $s.networkMinutes) { ForEach([1.0, 2, 5, 10], id: \.self) { Text(Fmt.duration($0 * 60)).tag($0) } }
-                    .labelsHidden().fixedSize().disabled(!s.network)
-            }
-            Toggle("Record short spikes in History", isOn: $s.recordSpikes)
-            Text("Alerts need a problem to last: an app over the limit for the time you pick, memory critical for 30s, heat for 30s. Shorter spikes are only recorded. See them in History › Events.")
-                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-        }
-        .padding(.leading, 20)
-        .onChange(of: s) { Alerts.shared.settings = s }
-    }
-}
-
-struct SettingsView: View {
-    @Environment(AppModel.self) private var model
-
-    var body: some View {
-        @Bindable var model = model
-        Form {
-            Picker("Update frequency:", selection: $model.interval) {
-                Text("Every 1s").tag(1.0)
-                Text("Every 2s").tag(2.0)
-                Text("Every 5s").tag(5.0)
-                Text("Every 10s").tag(10.0)
-            }
-            Text("Less frequent updates use less energy. Sampling pauses completely while the window is hidden or covered.")
-                .font(.caption).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Picker("CPU percentages:", selection: $model.cpuShareOfAllCores) {
-                Text("Per core (macOS convention)").tag(false)
-                Text("Share of all cores, like Windows").tag(true)
-            }
-            .pickerStyle(.radioGroup)
-
-            Divider().padding(.vertical, 6)
-            Toggle("Show in menu bar", isOn: $model.showMenuBar)
-            Picker("Menu bar shows:", selection: $model.menuBarStyle) {
-                Text("CPU").tag("cpu"); Text("Memory").tag("memory"); Text("CPU and memory").tag("both"); Text("Icon only").tag("icon")
-            }
-            .disabled(!model.showMenuBar)
-            Toggle("Record app history", isOn: $model.historyEnabled)
-            Toggle("Alerts", isOn: $model.alertsEnabled)
-            AlertSettings().disabled(!model.alertsEnabled)
-            Text("With the window closed, Apex keeps these running by sampling every 10s — about 1% of one core.")
-                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-
-            Divider().padding(.vertical, 6)
-            LabeledContent("Permissions:") {
-                Button("Review Permissions…") { model.showWelcome = true; model.openMainWindow?() }
-            }
-            FloatingShelfToggle()
-            BluetoothTypeSettings()
-        }
-        .padding(20)
-        .frame(width: 500)
-    }
-}
-
-/// Settings: pop the shelf up when a file drag starts.
-struct FloatingShelfToggle: View {
-    @State private var on = FloatingShelf.shared.enabled
-    var body: some View {
-        Toggle("Show the shelf when you start dragging a file (wiggle the file for a new shelf)", isOn: $on)
-            .onChange(of: on) { FloatingShelf.shared.enabled = on }
-    }
-}
-
-/// Settings › Bluetooth accessories: what each connected device is, so the
-/// Accessories popover can estimate its power use.
-struct BluetoothTypeSettings: View {
-    @State private var devices: [AccessoryControl.BluetoothDevice] = []
-
-    var body: some View {
-        LabeledContent("Bluetooth accessories:") {
-            VStack(alignment: .leading, spacing: 6) {
-                if devices.isEmpty {
-                    Text("No Bluetooth devices connected.").foregroundStyle(.secondary)
-                }
-                ForEach(devices) { d in
-                    Picker(d.name, selection: Binding(get: { d.type }, set: { t in
-                        BluetoothTypes.set(t, for: d.address)
-                        devices = AccessoryControl.bluetoothDevices()
-                    })) {
-                        ForEach(BluetoothType.allCases) { t in Text(t.title).tag(t) }
-                    }
-                    .fixedSize()
-                }
-                Text("Pick what each device is. Energy › Accessories shows a typical power figure for that type; macOS doesn’t measure accessories’ real power use.")
-                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        .task { devices = await Task.detached(priority: .utility) { AccessoryControl.bluetoothDevices() }.value }
     }
 }

@@ -1,20 +1,22 @@
 import AppKit
 import Observation
+import ProcessIdentityCore
 import SwiftUI
 
 enum AppSection: String, CaseIterable, Identifiable {
-    case processes, performance, ai, history, startup, users, services
+    case processes, performance, ai, history, startup, users, services, report
     var id: String { rawValue }
 
     var title: String {
         switch self {
         case .processes: return "Processes"
         case .performance: return "Performance"
-        case .ai: return "Local AI"
+        case .ai: return "Assistant"
         case .history: return "App History"
         case .startup: return "Startup Items"
         case .users: return "Users"
         case .services: return "Services"
+        case .report: return "Report"
         }
     }
 
@@ -24,13 +26,21 @@ enum AppSection: String, CaseIterable, Identifiable {
         switch self {
         case .processes: return "square.stack.3d.up"
         case .performance: return "waveform.path.ecg"
-        case .ai: return "cpu"
+        case .ai: return "sparkles"
         case .history: return "clock.arrow.circlepath"
         case .startup: return "power"
         case .users: return "person.2"
         case .services: return "gearshape.2"
+        case .report: return "doc.text.magnifyingglass"
         }
     }
+
+    /// The tabs for a server or container (This Mac menu). The others are
+    /// about this Mac, so they're hidden then; Report is only for servers.
+    var followsTarget: Bool { [.processes, .performance, .services, .users, .report].contains(self) }
+    var onMac: Bool { self != .report }
+
+    static func tabs(_ t: MachineTarget) -> [AppSection] { allCases.filter { t.isMac ? $0.onMac : $0.followsTarget } }
 
     /// Views that list processes need the root/other-user `ps` fallback.
     var needsRestricted: Bool { [.processes, .users, .performance, .ai].contains(self) }
@@ -61,14 +71,31 @@ final class AppModel {
     private(set) var hasData = false
 
     // MARK: UI state
-    var section: AppSection = AppSection(rawValue: UserDefaults.standard.string(forKey: "section") ?? "") ?? .processes {
-        didSet { UserDefaults.standard.set(section.rawValue, forKey: "section"); updateNeeds() }
+    var section: AppSection = AppSection(rawValue: UserDefaults.standard.string(forKey: "section") ?? "").flatMap { $0.onMac ? $0 : nil } ?? .processes {
+        didSet {
+            // A Mac-only page (from a shortcut, alert or the Assistant) goes back to this Mac.
+            if !target.isMac && !section.followsTarget { target = .mac }
+            UserDefaults.standard.set(section.rawValue, forKey: "section"); updateNeeds()
+        }
+    }
+    /// This Mac, or a server / container the app is showing (Performance › This Mac menu).
+    /// Not remembered: Apex always opens on this Mac.
+    var target: MachineTarget = .mac {
+        didSet {
+            if target.isMac ? !section.onMac : !section.followsTarget { section = .performance }
+        }
     }
     var search = ""
     var processFilter: ProcessFilter = ProcessFilter(rawValue: UserDefaults.standard.string(forKey: "processFilter") ?? "") ?? .all {
         didSet { UserDefaults.standard.set(processFilter.rawValue, forKey: "processFilter") }
     }
-    var processSelection = Set<String>()
+    var processSelection = Set<String>() {
+        // The processes as they were when picked: an action later acts on
+        // these, not on whatever has their PIDs by then.
+        didSet { selectedAt = Dictionary(ProcessTree.pids(for: processSelection, in: snapshot.processes).compactMap { pid in
+            process(pid).map { (pid, $0.identity) } }, uniquingKeysWith: { a, _ in a }) }
+    }
+    @ObservationIgnored private var selectedAt: [pid_t: ProcessIdentity] = [:]
     var collapsed = Set<String>()          // collapsed section rows
     var expanded = Set<String>()           // expanded app / name groups
     var showRunTask = false
@@ -92,6 +119,8 @@ final class AppModel {
         didSet { UserDefaults.standard.set(showInspector, forKey: "showInspector") }
     }
     var showWhoIsUsing = false
+    /// Census (Processes › More): it needs network and GPU per process while open.
+    var showCensus = false { didSet { updateNeeds() } }
     var showCleanup = false { didSet { if !showCleanup { storageVolume = nil } } }
     /// Storage hub target: nil = the startup drive, else a plugged-in volume's path.
     var storageVolume: String?
@@ -170,6 +199,13 @@ final class AppModel {
                 MainActor.assumeIsolated { self?.publishRunningApps() }
             })
         }
+        // You opened an app Apex optimized: it's in use again, so it stops being optimized.
+        for name in [NSWorkspace.didActivateApplicationNotification, NSWorkspace.didUnhideApplicationNotification] {
+            observers.append(nc.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
+                guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+                MainActor.assumeIsolated { self?.appOpened(app) }
+            })
+        }
         for name in [NSApplication.didChangeOcclusionStateNotification, NSWindow.didChangeOcclusionStateNotification,
                      NSWindow.willCloseNotification, NSWindow.didBecomeKeyNotification, NSWindow.didMiniaturizeNotification] {
             observers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
@@ -180,10 +216,12 @@ final class AppModel {
         updateRunning()
         updateNeeds()
         updateVisibility()
+        ServerStore.shared.startReports()
         // APEX_OPEN=freememory|storage opens that sheet at launch (screenshots, layout checks).
         switch ProcessInfo.processInfo.environment["APEX_OPEN"] {
         case "freememory": showFreeMemory = true
-        case "storage": showCleanup = true
+        case "storage", "clean": showCleanup = true
+        case "census": showCensus = true
         default: break
         }
         // Test switch: APEX_RECORD=1 (everything) or =cpu,memory,… starts recordings at launch (saved on quit).
@@ -193,7 +231,7 @@ final class AppModel {
         }
     }
 
-    func stop() { sampler.shutdown(); HistoryStore.shared.save(); DriveHealthStore.shared.save() }
+    func stop() { sampler.shutdown(); HistoryStore.shared.save(); DriveHealthStore.shared.save(); ServerReports.shared.save() }
 
     func refreshNow() { sampler.refreshNow() }
 
@@ -270,8 +308,8 @@ final class AppModel {
         }
         if windowVisible {
             // Performance includes the GPU page (top GPU processes, Local AI share).
-            gpuSampled = [.processes, .ai, .performance].contains(section)
-            sampler.setNeeds(.init(network: section == .processes || historyEnabled,
+            gpuSampled = [.processes, .ai, .performance].contains(section) || showCensus
+            sampler.setNeeds(.init(network: section == .processes || historyEnabled || showCensus,
                                    gpu: gpuSampled,
                                    restricted: section.needsRestricted,
                                    processes: true, background: false))
@@ -328,16 +366,31 @@ final class AppModel {
 
     // MARK: Actions
 
-    func endSelected(force: Bool) { end(pids: selectedPIDs, force: force) }
+    func endSelected(force: Bool) { end(identities(selectedPIDs, selection: true), force: force) }
 
-    func end(pids: [pid_t], force: Bool) {
-        guard !pids.isEmpty else { return }
-        let names = pids.compactMap { process($0)?.name }
-        let label = names.count == 1 ? "“\(names[0])”" : "\(pids.count) processes"
-        handle(ProcessActions.end(pids: pids, force: force),
-               admin: AdminPrompt(title: "End \(label) as administrator?",
-                                  message: "This process belongs to another user or the system. macOS will ask for your password.",
-                                  action: { ProcessActions.endAsAdmin(pids: pids, force: force) }))
+    /// The identities of `pids`: as they were when the user selected them
+    /// (`selection`), else as the latest sample shows them, which is what's
+    /// on screen. A PID that isn't in the sample can't be verified and is
+    /// left out.
+    func identities(_ pids: [pid_t], selection: Bool = false) -> [ProcessIdentity] {
+        pids.compactMap { pid in (selection ? selectedAt[pid] : nil) ?? process(pid)?.identity }
+    }
+
+    /// Names for messages, from the sample that matches each identity.
+    private func names(of targets: [ProcessIdentity]) -> [ProcessIdentity: String] {
+        var out: [ProcessIdentity: String] = [:]
+        for t in targets { if let p = process(t.pid), p.identity == t { out[t] = p.appName ?? p.name } }
+        return out
+    }
+
+    func end(pids: [pid_t], force: Bool) { end(identities(pids), force: force) }
+
+    /// Ends these processes, each only if it's still the one that was meant.
+    func end(_ targets: [ProcessIdentity], names known: [ProcessIdentity: String] = [:], force: Bool) {
+        guard !targets.isEmpty else { return }
+        let names = names(of: targets).merging(known) { _, k in k }
+        finish(ProcessActions.end(targets, force: force), names: names, verb: "end",
+               admin: { ProcessActions.signalAsAdmin($0, force ? "KILL" : "TERM") })
     }
 
     /// Processes that must never be paused (pausing them freezes the Mac).
@@ -354,14 +407,86 @@ final class AppModel {
             errorMessage = "System processes can’t be paused — doing so would freeze your Mac."
             return
         }
-        handle(ProcessActions.pause(pids: safe, on),
-               admin: AdminPrompt(title: on ? "Pause as administrator?" : "Resume as administrator?",
-                                  message: "This process belongs to another user. macOS will ask for your password.",
-                                  action: { ProcessActions.pauseAsAdmin(pids: safe, on) }))
+        let targets = identities(safe)
+        finish(ProcessActions.pause(targets, on), names: names(of: targets), verb: on ? "pause" : "resume",
+               admin: { ProcessActions.signalAsAdmin($0, on ? "STOP" : "CONT") })
     }
 
     func endTree(pids: [pid_t], force: Bool) {
         end(pids: ProcessActions.withDescendants(pids, in: snapshot.processes), force: force)
+    }
+
+    /// Ends `targets` and every process they started (found in the latest sample).
+    func endTree(_ targets: [ProcessIdentity], force: Bool) {
+        let all = ProcessActions.withDescendants(targets.map(\.pid), in: snapshot.processes)
+        let roots = Dictionary(targets.map { ($0.pid, $0) }, uniquingKeysWith: { a, _ in a })
+        end(all.compactMap { roots[$0] ?? process($0)?.identity }, force: force)
+    }
+
+    /// After an action: refresh, say what was refused and why, and offer the
+    /// administrator prompt for what needs it (re-checked there by apex-signal).
+    private func finish(_ r: ProcessActions.Report, names: [ProcessIdentity: String], verb: String,
+                        admin: @escaping @Sendable ([ProcessIdentity]) -> ProcessActions.Report) {
+        refreshNow()
+        let note = Self.message(for: r, names: names, verb: verb)
+        guard !r.needsAdmin.isEmpty else {
+            if let note { errorMessage = note }
+            return
+        }
+        let pending = r.needsAdmin
+        let label = pending.count == 1 ? "“\(names[pending[0]] ?? "this process")”" : "\(pending.count) processes"
+        adminPrompt = AdminPrompt(
+            title: "\(verb.capitalized) \(label) as administrator?",
+            message: "It belongs to another user or the system. macOS will ask for your password; Apex checks again that it’s the same process first."
+                + (note.map { "\n\n" + $0 } ?? ""),
+            action: {
+                let r2 = admin(pending)
+                if r2.cancelled { return .ok }
+                return Self.message(for: r2, names: names, verb: verb).map { .failed($0) } ?? .ok
+            })
+    }
+
+    /// Plain words for what wasn't done, and why. Nil when everything went through. Pure: tested.
+    nonisolated static func message(for r: ProcessActions.Report, names: [ProcessIdentity: String], verb: String) -> String? {
+        func name(_ t: ProcessIdentity) -> String { "“\(names[t] ?? "process \(t.pid)")”" }
+        func list(_ ts: [ProcessIdentity]) -> String { ListFormatter.localizedString(byJoining: ts.map(name)) }
+        var lines: [String] = []
+        let reused = r.refused.filter { $0.result == .reused }.map(\.target)
+        let unverifiable = r.refused.filter { $0.result == .unverifiable }.map(\.target)
+        let protected = r.refused.filter { $0.result == .protected }.map(\.target)
+        if !reused.isEmpty {
+            lines.append("\(list(reused)) had already quit, and \(reused.count == 1 ? "its process ID now belongs" : "their process IDs now belong") to something else, so nothing was done to \(reused.count == 1 ? "it" : "them").")
+        }
+        if !unverifiable.isEmpty {
+            lines.append("Apex couldn’t confirm \(list(unverifiable)) \(unverifiable.count == 1 ? "is" : "are") still the same, so it didn’t \(verb) \(unverifiable.count == 1 ? "it" : "them").")
+        }
+        if !protected.isEmpty { lines.append("Apex doesn’t \(verb) \(list(protected)).") }
+        lines += Array(Set(r.failures)).sorted()
+        return lines.isEmpty ? nil : lines.joined(separator: "\n")
+    }
+
+    /// From an alert's Quit button (the alert may be minutes or hours old):
+    /// asks first, naming the app, then quits only what's still the same process.
+    func confirmEndFromAlert(_ targets: [ProcessIdentity], name: String, alert: String, raised: Date?) {
+        guard !targets.isEmpty else {
+            openMainWindow?()
+            errorMessage = "This alert came from an earlier version of Apex, which didn’t record exactly which process it meant. Quit \(name) from Processes instead."
+            return
+        }
+        let live = targets.filter { $0.check() == .same }
+        guard !live.isEmpty else {
+            errorMessage = "\(name) has already quit since the alert, so there’s nothing to quit."
+            return
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        let a = NSAlert()
+        a.messageText = "Quit \(name)?"
+        let when = raised.map { " at " + $0.formatted(date: .omitted, time: .shortened) } ?? ""
+        a.informativeText = "From the alert “\(alert)”\(when). Apex quits only the processes that are still the same ones; anything that has restarted since is left alone."
+        a.addButton(withTitle: "Quit")
+        a.addButton(withTitle: "Cancel")
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        end(targets, names: Dictionary(targets.map { ($0, name) }, uniquingKeysWith: { a, _ in a }), force: false)
     }
 
     func setPriority(_ nice: Int32, pids explicit: [pid_t]? = nil) {
@@ -399,6 +524,26 @@ final class AppModel {
                 }
                 return r
             }))
+    }
+
+    /// An app was brought to the front or shown again. If Apex had optimized
+    /// it, it's in use now: the app and its helpers leave background mode
+    /// (full speed again) and the leaf goes away.
+    func appOpened(_ app: NSRunningApplication) {
+        let pids = Self.pidsToRestore(opened: app.processIdentifier, bundle: app.bundleURL?.path ?? "",
+                                      optimized: optimized, optimizedApps: optimizedApps, processes: snapshot.processes)
+        if !pids.isEmpty { setOptimized(pids: pids, false) }
+    }
+
+    /// What to restore when an app is opened: nothing unless it was optimized;
+    /// otherwise the app and every process of the same app bundle. Pure: tested.
+    nonisolated static func pidsToRestore(opened pid: pid_t, bundle: String, optimized: Set<pid_t>,
+                                          optimizedApps: Set<String>, processes: [ProcessInfoSample]) -> [pid_t] {
+        let remembered = !bundle.isEmpty && optimizedApps.contains(bundle)
+        guard optimized.contains(pid) || remembered else { return [] }
+        var pids = Set(processes.filter { !bundle.isEmpty && $0.bundlePath == bundle && ($0.background || optimized.contains($0.pid) || remembered) }.map(\.pid))
+        pids.insert(pid)
+        return pids.sorted()
     }
 
     /// Every optimized process (remembered apps with their helpers, and any

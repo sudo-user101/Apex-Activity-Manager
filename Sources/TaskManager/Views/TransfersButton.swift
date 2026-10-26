@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Header icon on each drive page: blue while files are being copied onto the
 /// drive; click for each file, where it's going, progress and what can be done.
@@ -51,7 +52,7 @@ private struct TransfersPopover: View {
     private func row(_ t: TransferMonitor.Transfer) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 8) {
-                Image(nsImage: NSWorkspace.shared.icon(forFileType: t.file.pathExtension)).resizable().frame(width: 20, height: 20)
+                Image(nsImage: NSWorkspace.shared.icon(for: UTType(filenameExtension: t.file.pathExtension) ?? .data)).resizable().frame(width: 20, height: 20)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(t.name).lineLimit(1).truncationMode(.middle)
                     Text(status(t)).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)

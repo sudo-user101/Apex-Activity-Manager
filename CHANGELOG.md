@@ -1,6 +1,47 @@
 # Changelog
 
-## Unreleased
+## 1.3.0 (2026-10-26)
+
+- **Servers and containers:** add Linux servers (SSH, or the new
+  [Apex Server Edition](https://github.com/sudo-user101/Apex-Activity-Manager-Server-Edition))
+  and see Docker containers in the This Mac menu. Pick one and the whole app
+  shows it: Processes, Performance, Users, Services, and a **Report** tab
+  (last 1, 6 or 24 hours, what happened and what was busiest, save as PDF),
+  plus a report for all servers or all containers at once.
+- **Apex Server Edition pairing:** enter the server's address and the
+  one-time pairing code; Apex remembers the server's certificate and refuses
+  any other. End processes and start, stop or restart services and
+  containers, without sudo or SSH.
+- **Census** (Processes › More, ⇧⌘K): the top apps for CPU, memory, energy,
+  disk, network and GPU in one view.
+- **Energy:** select what's using power and End Task or Force End it.
+- **Memory page:** calmer colours, a clearer graph, and a breakdown in three
+  columns (overview, composition, memory pressure). Pressure is shown as
+  macOS's own score, coloured by its state. Swap has a round, easy-to-hit
+  button.
+- **Assistant:** ask about your Mac with a local model, or any AI provider
+  with your own key (named, grouped keys, checked when saved, nothing
+  spent); Apex Agent can quit apps and stop processes when you ask and
+  confirm.
+- **Settings:** a native window with General, Alerts, History, Shelf and
+  Permissions tabs.
+- **Shelf:**
+  - Opens as a stack.
+  - Drag single files out of the list.
+  - Every kind of drop lands, and a failed one says why.
+  - Dropping files back on their own shelf no longer duplicates them.
+  - Kept shelves in the menu bar show a pile, a count and an icon.
+  - Pin up to 5, pinned first.
+  - After you drop its files into an app or a folder, the floating shelf
+    flies into the menu bar and waits in the menu bar's Shelf tab.
+- **Safer Quit and Force Quit:** Apex now remembers exactly which process
+  you chose (not just its number), and macOS itself refuses the action if
+  that process has quit and its number was reused. Quit from an alert asks
+  first. Ending another user's process as administrator re-checks each one.
+- **Network › Shell:** ready-made commands in categories with live output.
+- **Cloud Disks:** says when a service's app is signed out or not open.
+- **Remove app** also finds system files, installer records and sign-ins.
+- **Disk › Clean:** plain words, safety labels, and a Free Up button.
 
 - **Signed and notarized releases:** `build.sh --notarize` signs the app and
   its helper with a Developer ID (hardened runtime, secure timestamp),

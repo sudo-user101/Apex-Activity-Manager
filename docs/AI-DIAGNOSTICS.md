@@ -41,7 +41,7 @@ DiagnosisReport ──► DiagnosticExplainer (protocol)
 
 ## A. Bring your own key
 
-- Providers: start with one (Anthropic), add others behind the same protocol.
+- Providers: done (2026-10-26). Cloud API takes any provider (Anthropic, Google Gemini, Mistral, OpenAI, OpenRouter, any OpenAI-compatible address) with named, grouped keys; Lumen AI is CyberNet Labs' own service (monthly plan or API access), coming soon until its address exists.
 - Key stored in the **macOS Keychain** (`kSecClassGenericPassword`, service
   `com.cybernetlabs.apex.ai`, `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`),
   never in UserDefaults, files or logs. Shown masked; "Remove key" deletes it.

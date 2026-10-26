@@ -81,12 +81,16 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN_DIR/TaskManager" "$APP/Contents/MacOS/TaskManager"
 cp "$BIN_DIR/ApexFanHelper" "$APP/Contents/MacOS/apex-fanhelper"   # privileged fan helper (installed on demand)
 strip -x "$APP/Contents/MacOS/apex-fanhelper" 2>/dev/null || true
+cp "$BIN_DIR/ApexSignal" "$APP/Contents/MacOS/apex-signal"         # ends / pauses processes as administrator, by identity
+strip -x "$APP/Contents/MacOS/apex-signal" 2>/dev/null || true
 strip -x "$APP/Contents/MacOS/TaskManager" 2>/dev/null || true
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+cp Resources/apex-agent.py "$APP/Contents/Resources/apex-agent.py"   # sent to servers over SSH (Servers page)
 # Sign the nested helper first (strip removes the linker's signature on universal builds).
 # Its identifier matches its LaunchDaemon label.
 sign "$APP/Contents/MacOS/apex-fanhelper" Resources/ApexFanHelper.entitlements com.apex.fanhelper
+sign "$APP/Contents/MacOS/apex-signal" Resources/ApexSignal.entitlements com.apex.signal
 sign "$APP" Resources/Apex.entitlements
 if [ -n "$IDENTITY" ]; then
   codesign --verify --strict --deep "$APP"

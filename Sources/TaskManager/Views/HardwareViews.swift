@@ -12,6 +12,8 @@ final class HardwareStore {
     private(set) var sensors = SensorSnapshot()
     private(set) var cpuTempHistory: [Double] = []
     private(set) var gpuTempHistory: [Double] = []
+    /// The battery's own temperature (laptops), sampled with the others.
+    private(set) var batteryTempHistory: [Double] = []
     private(set) var cpuTempTimes: [Date] = []
     private(set) var loaded = false
     /// Battery charge every minute for the last 12 hours (recorded even
@@ -78,10 +80,11 @@ final class HardwareStore {
         sensors = s
         cpuTempHistory.append(s.cpuTemp ?? 0)
         gpuTempHistory.append(s.gpuTemp ?? 0)
+        batteryTempHistory.append(battery.temperature ?? 0)
         cpuTempTimes.append(Date())
         let cutoff = Date().addingTimeInterval(-History.window)
         while cpuTempTimes.count > 1 && cpuTempTimes[1] < cutoff {
-            cpuTempTimes.removeFirst(); cpuTempHistory.removeFirst(); gpuTempHistory.removeFirst()
+            cpuTempTimes.removeFirst(); cpuTempHistory.removeFirst(); gpuTempHistory.removeFirst(); batteryTempHistory.removeFirst()
         }
         if doBattery || !loaded {
             let (b, bt) = await Task.detached(priority: .utility) { (Battery.read(), Battery.bluetooth()) }.value
@@ -103,10 +106,13 @@ struct EnergyDetail: View {
     @State private var sleepBlockers: [pid_t: [String]] = [:]
     @AppStorage("energySortKey") private var sortKey = "power"
     @AppStorage("energySortAscending") private var sortAscending = false
+    @State private var selection = Set<String>()
+    /// Tests: a sample of their own (they don't run the app's sampler).
+    var processes: [ProcessInfoSample]? = nil
 
     var body: some View {
         let b = store.battery
-        let rows = EnergyRow.build(model.snapshot.processes, blockers: sleepBlockers, optimized: model.optimized,
+        let rows = EnergyRow.build(processes ?? model.snapshot.processes, blockers: sleepBlockers, optimized: model.optimized,
                                    sortKey: sortKey, ascending: sortAscending)
         VStack(alignment: .leading, spacing: 16) {
             PageHeader(title: "Energy",
@@ -161,17 +167,32 @@ struct EnergyDetail: View {
     }
 
     @ViewBuilder private func appsTable(_ rows: [EnergyRow]) -> some View {
+        // Selected rows still on the list (an ended one drops off).
+        let chosen = rows.filter { selection.contains($0.id) }.compactMap { pid_t($0.id.dropFirst(2)) }
+        HStack(spacing: 10) {
+            Text("Using power").font(.headline)
+            Text("\(rows.count) app\(rows.count == 1 ? "" : "s") and process\(rows.count == 1 ? "" : "es"), most first")
+                .foregroundStyle(.secondary)
+            Spacer()
+            Button("Force End") { model.end(pids: chosen, force: true); selection = [] }
+                .disabled(chosen.isEmpty)
+                .help("End it straight away, without letting it save (for one that won’t quit)")
+            Button("End Task") { model.end(pids: chosen, force: false); selection = [] }
+                .buttonStyle(.borderedProminent)
+                .disabled(chosen.isEmpty)
+                .help("Quit the selected app or process (it can save first). Select several with ⌘-click.")
+        }
             NativeOutline(rows: rows, columns: EnergyRow.columns, autosaveName: "EnergyOutline.v1",
-                      selection: [], sortKey: sortKey, sortAscending: sortAscending,
-                      isExpanded: { _ in false }, onSelect: { _ in },
+                      selection: selection, sortKey: sortKey, sortAscending: sortAscending,
+                      isExpanded: { _ in false }, onSelect: { selection = $0 },
                       onSort: { sortKey = $0; sortAscending = $1 }, onExpand: { _, _ in },
                       onDoubleClick: { id in if let pid = pid_t(id.dropFirst(2)) { model.reveal(pid: pid) } },
                       menu: { ids in ProcessMenu.make(model: model, pids: ids.compactMap { pid_t($0.dropFirst(2)) }) },
                       popover: { id in pid_t(id.dropFirst(2)).map { AnyView(ProcessDetailPopover(pid: $0)) } })
-            .frame(height: 300)
+            .frame(height: 420)
             .clipShape(RoundedRectangle(cornerRadius: 8))
             .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.separator, lineWidth: 0.5))
-        Text("Power is the energy each app’s CPU work uses right now; Today is the total so far. System processes need admin rights to measure.")
+        Text("Power is the energy each app’s CPU work uses right now (helpers counted with their app); Today is the total so far. Select one and End Task, or right-click for more. System processes need admin rights to measure.")
             .font(.caption).foregroundStyle(.tertiary)
 
     }
@@ -314,7 +335,7 @@ struct EnergyRow: OutlineRow {
     }
 
     @MainActor static let columns: [OutlineColumn<EnergyRow>] = [
-        OutlineColumn(id: "name", title: "App", width: 260, minWidth: 150, alignment: .left, defaultAscending: true,
+        OutlineColumn(id: "name", title: "App or Process", width: 260, minWidth: 150, alignment: .left, defaultAscending: true,
                       canHide: false, text: { $0.name },
                       icon: { IconCache.shared.icon(forBundle: $0.bundlePath) },
                       badge: { $0.optimized ? ProcessColumns.leaf : nil }),

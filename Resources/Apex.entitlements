@@ -2,8 +2,9 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   Apex Activity Manager (hardened runtime, not sandboxed).
-  apple-events: Startup adds and removes login items through System Events
-  (via osascript); without this the hardened runtime blocks it. Nothing else is needed: Apex uses no camera,
+  apple-events: Startup adds and removes login items through System Events,
+  and Shell's Open in Terminal drives Terminal (both via osascript);
+  without this the hardened runtime blocks them. Nothing else is needed: Apex uses no camera,
   microphone, location, contacts, calendars or photos, loads only Apple's own
   frameworks, and needs no JIT.
 -->

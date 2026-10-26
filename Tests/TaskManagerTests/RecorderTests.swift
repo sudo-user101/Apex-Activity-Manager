@@ -81,3 +81,33 @@ extension RecorderTests {
         XCTAssertEqual(RecordScope.page(.battery), .energy); XCTAssertNil(RecordScope.page(.display))
     }
 }
+
+final class OpenedAppRestoreTests: XCTestCase {
+    private func p(_ pid: pid_t, _ bundle: String, bg: Bool, app: Bool = false) -> ProcessInfoSample {
+        ProcessInfoSample(pid: pid, ppid: 1, uid: 501, user: "u", name: "p\(pid)", path: bundle + "/x", bundlePath: bundle,
+                          kind: app ? .app : .background, state: .sleeping, nice: 0, started: nil, threads: 1, cpu: 0, cpuUser: 0,
+                          cpuSystem: 0, memory: 1, diskReadPerSec: 0, diskWritePerSec: 0, netPerSec: 0, gpu: 0,
+                          restricted: false, isRegularApp: app, appName: nil, background: bg)
+    }
+
+    func testOpeningAnOptimizedAppRestoresItAndItsHelpers() {
+        let procs = [p(10, "/Applications/Safari.app", bg: true, app: true), p(11, "/Applications/Safari.app", bg: true),
+                     p(12, "/Applications/Safari.app", bg: false), p(20, "/Applications/Mail.app", bg: true, app: true)]
+        let pids = AppModel.pidsToRestore(opened: 10, bundle: "/Applications/Safari.app", optimized: [10, 11, 20],
+                                          optimizedApps: ["/Applications/Safari.app", "/Applications/Mail.app"], processes: procs)
+        XCTAssertEqual(pids, [10, 11, 12], "the app and its helpers; Mail stays optimized")
+    }
+
+    func testOpeningAnAppThatWasntOptimizedDoesNothing() {
+        let procs = [p(30, "/Applications/Notes.app", bg: false, app: true)]
+        XCTAssertEqual(AppModel.pidsToRestore(opened: 30, bundle: "/Applications/Notes.app", optimized: [10],
+                                              optimizedApps: ["/Applications/Safari.app"], processes: procs), [])
+    }
+
+    func testOptimizedBeforeARelaunchIsStillCaught() {
+        // Apex was relaunched: the app isn't remembered by bundle, but macOS still has it in background mode.
+        let procs = [p(40, "/Applications/Plex.app", bg: true, app: true), p(41, "/Applications/Plex.app", bg: true)]
+        XCTAssertEqual(AppModel.pidsToRestore(opened: 40, bundle: "/Applications/Plex.app", optimized: [40, 41],
+                                              optimizedApps: [], processes: procs), [40, 41])
+    }
+}

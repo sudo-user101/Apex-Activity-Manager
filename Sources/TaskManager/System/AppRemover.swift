@@ -6,12 +6,30 @@ import AppKit
 /// name, in the folders macOS apps keep their data in. Everything goes to the
 /// Trash, so it can be put back.
 enum AppRemover {
+    /// The groups shown in the remove sheet, each with its own tick.
+    enum Group: String, CaseIterable, Sendable { case data, system, signIns, documents }
+
     struct Leftover: Identifiable, Hashable, Sendable {
         var id: String { path }
+        /// A file's path; for a sign-in "keychain:…", for an installer record "receipt:…".
         let path: String
         let kind: String           // "Settings", "Caches"…
         var size: UInt64 = 0
-        var name: String { (path as NSString).lastPathComponent }
+        var group: Group = .data
+        /// System files outside your home folder: removing them asks for your password.
+        var needsAdmin = false
+        /// Shown instead of the file name (sign-ins, installer records).
+        var label: String? = nil
+        var keychain: KeychainRef? = nil
+        var name: String { label ?? (path as NSString).lastPathComponent }
+        var isFile: Bool { path.hasPrefix("/") }
+    }
+
+    /// A saved sign-in in the login keychain (never its password).
+    struct KeychainRef: Hashable, Sendable {
+        let internet: Bool
+        let service: String       // service, or server for website passwords
+        let account: String
     }
 
     struct AppInfo: Sendable {
@@ -70,18 +88,88 @@ enum AppRemover {
                 let p = base + "/" + name
                 out.append(Leftover(path: p, kind: kind, size: FastSize.allocated(p).bytes))
             }
+            // Data kept under the company's folder: "Application Support/Google/Chrome"
+            // for com.google.Chrome. Only the app's own folder inside, never the company folder.
+            if let vendor = vendorName(app.bundleID) {
+                for name in (try? fm.contentsOfDirectory(atPath: base)) ?? [] where name.lowercased() == vendor {
+                    let vdir = base + "/" + name
+                    for sub in (try? fm.contentsOfDirectory(atPath: vdir)) ?? [] where namesApp(sub, app) {
+                        let p = vdir + "/" + sub
+                        if !out.contains(where: { $0.path == p }) { out.append(Leftover(path: p, kind: kind, size: FastSize.allocated(p).bytes)) }
+                    }
+                }
+            }
+            // A folder named like the app's file ("Application Support/Google Chrome").
+            let fileName = ((app.path as NSString).lastPathComponent as NSString).deletingPathExtension
+            if fileName.count >= 3, fileName.lowercased() != app.name.lowercased() {
+                for name in (try? fm.contentsOfDirectory(atPath: base)) ?? [] where name.lowercased() == fileName.lowercased() {
+                    let p = base + "/" + name
+                    if !out.contains(where: { $0.path == p }) { out.append(Leftover(path: p, kind: kind, size: FastSize.allocated(p).bytes)) }
+                }
+            }
         }
         return out.sorted { $0.size > $1.size }
+    }
+
+    /// "com.google.Chrome" → "google". nil for short ids and Apple's. Pure: tested.
+    static func vendorName(_ bundleID: String) -> String? {
+        let parts = bundleID.lowercased().split(separator: ".")
+        guard parts.count >= 3, parts[1].count >= 3, parts[1] != "apple" else { return nil }
+        return String(parts[1])
+    }
+
+    /// A folder inside the company folder that is this app's: its short name
+    /// ("Chrome") or its file name ("Google Chrome").
+    private static func namesApp(_ folder: String, _ app: AppInfo) -> Bool {
+        let f = folder.lowercased()
+        let file = ((app.path as NSString).lastPathComponent as NSString).deletingPathExtension.lowercased()
+        return (app.name.count >= 3 && f == app.name.lowercased()) || (file.count >= 3 && f == file)
     }
 
     /// Moves the app (and the given leftovers) to the Trash. Returns what
     /// couldn't be moved.
     static func remove(appPath: String, leftovers: [Leftover]) -> [String] {
         var failed: [String] = []
-        for p in [appPath] + leftovers.map(\.path) {
+        // Files in your home folder (and the app): to the Trash.
+        for p in [appPath] + leftovers.filter({ $0.isFile && !$0.needsAdmin }).map(\.path) {
             do { try FileManager.default.trashItem(at: URL(fileURLWithPath: p), resultingItemURL: nil) }
             catch { failed.append((p as NSString).lastPathComponent) }
         }
+        // System files and installer records: one password prompt for all of them.
+        let admin = leftovers.filter { $0.needsAdmin }
+        if !admin.isEmpty {
+            let r = Shell.runAsAdmin(adminScript(admin, trash: NSHomeDirectory() + "/.Trash"),
+                                     prompt: "Apex needs your password to remove the app’s system files.")
+            if r.status != 0 { failed += admin.map(\.name) }
+        }
+        // Saved sign-ins: macOS may ask for your password for each.
+        for l in leftovers {
+            guard let k = l.keychain else { continue }
+            var q: [String: Any] = [kSecClass as String: k.internet ? kSecClassInternetPassword : kSecClassGenericPassword,
+                                    kSecAttrAccount as String: k.account]
+            q[(k.internet ? kSecAttrServer : kSecAttrService) as String] = k.service
+            let s = SecItemDelete(q as CFDictionary)
+            if s != errSecSuccess && s != errSecItemNotFound { failed.append(l.name) }
+        }
         return failed
+    }
+
+    /// The root shell script for system files: background services are stopped
+    /// first, files go to your Trash (with the time added so nothing is
+    /// overwritten), installer records are forgotten. Pure: tested.
+    static func adminScript(_ items: [Leftover], trash: String, stamp: String = "\(Int(Date().timeIntervalSince1970))") -> String {
+        var lines: [String] = []
+        for l in items {
+            if l.path.hasPrefix("receipt:") {
+                lines.append("/usr/sbin/pkgutil --forget \(Shell.quote(String(l.path.dropFirst(8)))) >/dev/null 2>&1")
+                continue
+            }
+            if l.path.hasPrefix("/Library/LaunchDaemons/") {
+                lines.append("/bin/launchctl bootout system \(Shell.quote(l.path)) >/dev/null 2>&1")
+            }
+            let name = (l.path as NSString).lastPathComponent
+            lines.append("/bin/mv -f \(Shell.quote(l.path)) \(Shell.quote(trash + "/" + name + " " + stamp))")
+        }
+        return lines.joined(separator: "; ")
     }
 }

@@ -190,6 +190,8 @@ struct ShelfTab: View {
     var onMinimize: ((@escaping @MainActor () -> Void) -> Void)? = nil
     /// Opens a kept shelf (floating: by the edge handle; menu bar: in place).
     var onOpen: ((ShelfTarget) -> Void)? = nil
+    /// A pinned category's own menu bar panel: it always shows that category (no back button).
+    var fixed = false
     private let store = ShelfStore.shared
     @State private var showLibrary = false
     @State private var targeted = false
@@ -202,10 +204,20 @@ struct ShelfTab: View {
     /// Selected tiles (click; ⌘-click for more), highlighted like Finder.
     @State private var selected = Set<UUID>()
     /// Files as one stack (default) or as a list of everything.
-    @AppStorage("shelfListMode") private var listMode = false
+    /// A shelf always opens as a stack; the list lasts while you look at that shelf.
+    @State private var listMode = false
+    /// Renaming: the file being renamed in the list, or the compressed copy (popover).
+    @State private var renaming: UUID?
+    @State private var renamingResult = false
+    /// Compress All waiting for a choice about the originals.
+    @State private var batch: BatchResult?
+    @State private var pendingBatch: BatchResult?
+    @State private var newName = ""
+    @FocusState private var nameFocused: Bool
 
     var body: some View {
         let shelf = store.shown
+        let gone = shelf.items.filter { !$0.exists }.count     // moved or deleted since they were dropped
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 if let onClose {
@@ -219,9 +231,12 @@ struct ShelfTab: View {
                                                  : "Close. It stays where it was kept.")
                 }
                 if let onMinimize { ShelfMinimizeButton(onMinimize: onMinimize) }
-                if store.open != .current {
+                if store.open != .current, !fixed {
                     Button { withAnimation(.easeInOut(duration: 0.2)) { store.open = .current } } label: { Image(systemName: "chevron.left") }
                         .buttonStyle(.borderless).help("Back to the current shelf")
+                }
+                if case .category = store.open {
+                    Image(systemName: shelf.symbol).foregroundStyle(ShelfLook.color(shelf.color) ?? .secondary)
                 }
                 Text(title(shelf)).font(.callout.weight(.semibold)).lineLimit(1)
                     .contentTransition(.opacity)
@@ -243,21 +258,38 @@ struct ShelfTab: View {
                     .disabled(shelf.items.isEmpty)
                 }
             }
-            // In the menu bar panel: shelves minimized to the menu bar, one click away.
-            if onClose == nil, store.open == .current, !store.menuBarShelves.isEmpty {
+            // In the menu bar panel: shelves minimized to the menu bar and the
+            // categories with files, one click away; drop files on one to add them.
+            // Pinned categories first, then the other categories with files, then shelves kept here.
+            let cats = store.categories.filter { !$0.items.isEmpty }
+            let kept = (cats.filter { $0.pinned == true } + cats.filter { $0.pinned != true }).map { ($0, ShelfTarget.category($0.id), $0.name) }
+                + store.menuBarShelves.map { ($0, ShelfTarget.side($0.id), Optional<String>.none) }
+            if onClose == nil, store.open == .current, !kept.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
-                        ForEach(store.menuBarShelves) { m in
-                            Button { open(.side(m.id)) } label: {
-                                HStack(spacing: 6) {
-                                    ShelfPreview(items: m.items).frame(width: 52, height: 30).scaleEffect(0.7, anchor: .leading)
-                                    Text(m.count).font(.caption)
+                        ForEach(kept, id: \.0.id) { shelf, target, name in
+                            Button { open(target) } label: {
+                                // The same chip for every stack: its pile, "7 · 📷", and a pin when it's in the menu bar.
+                                HStack(spacing: 7) {
+                                    ShelfPreview(items: shelf.items).frame(width: 30, height: 26)
+                                    Text("\(shelf.items.count)").font(.caption.weight(.semibold)).monospacedDigit()
+                                    Text("·").font(.caption).foregroundStyle(.tertiary)
+                                    HStack(spacing: 3) {
+                                        ForEach(shelf.kindSymbols.prefix(3), id: \.self) { Image(systemName: $0) }
+                                    }
+                                    .font(.caption).foregroundStyle(.secondary)
+                                    if shelf.pinned == true {
+                                        Image(systemName: "pin.fill").font(.system(size: 8)).foregroundStyle(ShelfLook.color(shelf.color) ?? .secondary)
+                                    }
                                 }
-                                .padding(.horizontal, 8).padding(.vertical, 4)
+                                .padding(.leading, 5).padding(.trailing, 10)
+                                .frame(height: 34)
                                 .background(Color.white.opacity(0.08), in: Capsule())
+                                .fixedSize()
                             }
                             .buttonStyle(.plain)
-                            .help(m.items.prefix(6).map(\.name).joined(separator: ", "))
+                            .onDrop(of: ShelfDrop.types, isTargeted: nil) { _ in drop(into: target); return true }
+                            .help((name.map { "\($0): " } ?? "") + shelf.kinds.map(\.text).joined(separator: ", ") + (shelf.pinned == true ? " · in the menu bar" : ""))
                         }
                     }
                 }
@@ -291,7 +323,7 @@ struct ShelfTab: View {
                 } else {
                     ShelfStackView(items: shelf.items,
                                    onShowList: { withAnimation(.easeInOut(duration: 0.22)) { listMode = true } },
-                                   menu: { stackMenu(shelf) })
+                                   menu: { stackMenu(shelf) }, shelf: shelf.id)
                         .transition(.scale(scale: 0.92).combined(with: .opacity))
                 }
             }
@@ -300,14 +332,46 @@ struct ShelfTab: View {
             .animation(.easeInOut(duration: 0.22), value: listMode)
             .frame(minHeight: 130)
             .animation(.easeOut(duration: 0.15), value: targeted)
-            .onDrop(of: [.fileURL, .image], isTargeted: $targeted) { providers in accept(providers); return true }
+            .onDrop(of: ShelfDrop.types, isTargeted: $targeted) { _ in drop(); return true }
+            .popover(item: $batch, arrowEdge: .bottom) { b in
+                BatchSummary(batch: b,
+                             useCopies: { finishBatch(b, useCopies: true) },
+                             useCopiesTrashOriginals: { finishBatch(b, useCopies: true, trashOriginals: true) },
+                             keepOriginals: { finishBatch(b, useCopies: false) })
+            }
+            // Closed without choosing: both stay, nothing is lost.
+            .onChange(of: batch == nil) { if batch == nil, let b = pendingBatch { pendingBatch = nil; keepBoth(b) } }
             HStack(spacing: 8) {
                 if let r = lastResult, note == nil {
-                    SizeChange(before: r.result.before, after: r.result.after)
-                    if r.result.url != r.original {
-                        Button("Compare") { comparing = ComparePair(original: r.original, copy: r.result.url) }
-                            .buttonStyle(.link).font(.caption)
+                    // Close it, or swipe it away.
+                    Dismissible(onDismiss: { withAnimation(.easeOut(duration: 0.2)) { lastResult = nil } }) {
+                        SizeChange(before: r.result.before, after: r.result.after, compact: r.result.url != r.original)
+                        if r.result.url != r.original {
+                            Button { comparing = ComparePair(original: r.original, copy: r.result.url) } label: {
+                                Image(systemName: "rectangle.split.2x1")
+                            }
+                            .buttonStyle(.borderless).help("Compare with the original: pictures, quality and every property")
+                            if let copy = shelf.items.first(where: { $0.path == r.result.url.path }) {
+                                Button { newName = copy.baseName; renamingResult = true } label: { Image(systemName: "pencil") }
+                                    .buttonStyle(.borderless)
+                                    .help("Rename the compressed copy")
+                                    .popover(isPresented: $renamingResult, arrowEdge: .bottom) { renamePopover(copy) }
+                            }
+                        }
                     }
+                    .transition(.opacity)
+                } else if let n = note {
+                    Dismissible(onDismiss: { withAnimation(.easeOut(duration: 0.2)) { note = nil } }) {
+                        Text(n).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                    }
+                    .transition(.opacity)
+                } else if gone > 0 {
+                    // Say so, one click to tidy up.
+                    Button { withAnimation(.easeInOut(duration: 0.2)) { store.removeMissing() } } label: {
+                        Text("\(gone) moved or deleted · Remove").font(.caption).lineLimit(1)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Take the files that were moved or deleted off this shelf")
                 } else {
                     Text(note ?? (shelf.items.isEmpty ? "" : listMode ? "Right-click a file for more" : "Drag out all · click to list"))
                         .font(.caption).foregroundStyle(note == nil ? .tertiary : .secondary).lineLimit(2)
@@ -319,7 +383,8 @@ struct ShelfTab: View {
                     }
                     .buttonStyle(.borderless)
                     .help(listMode ? "Show as a stack" : "Show every file as a list")
-                    Button("Clear") { store.clearCurrent() }.controlSize(.small)
+                    Button { store.clearCurrent() } label: { Image(systemName: "trash") }
+                        .buttonStyle(.borderless).help("Clear the shelf (the files stay where they are)")
                 }
             }
             .animation(.easeInOut(duration: 0.2), value: lastResult?.result.url)
@@ -329,9 +394,19 @@ struct ShelfTab: View {
                             onDiscard: pair.choose ? { discardCopy(pair) } : nil)
             }
         }
+        // A new shelf (or another one opened) starts clean, as a stack: no list,
+        // result, note, comparison or selection left over from the last one.
+        .onChange(of: shelf.id) {
+            lastResult = nil; note = nil; comparing = nil; selected = []; askMetadata = nil; listMode = false
+        }
         .onAppear {
             // Test switch: APEX_SHELF_SELECT=1 selects the first item (to check the highlight).
             if ProcessInfo.processInfo.environment["APEX_SHELF_SELECT"] == "1", let first = store.shown.items.first { selected = [first.id] }
+            // APEX_SHELF_RENAME=1 starts renaming the first file; APEX_SHELF_COMPRESSALL=1 runs Compress All.
+            if ProcessInfo.processInfo.environment["APEX_SHELF_RENAME"] == "1", let first = store.shown.items.first { listMode = true; startRename(first) }
+            if ProcessInfo.processInfo.environment["APEX_SHELF_COMPRESSALL"] == "1" { compressAll(store.shown.items.filter(\.exists)) }
+            // APEX_SHELF_COMPRESS=1 compresses the first file (photo details kept) and opens Compare.
+            if ProcessInfo.processInfo.environment["APEX_SHELF_COMPRESS"] == "1", let first = store.shown.items.first { compress(first, keepMetadata: true) }
         }
         .confirmationDialog("Keep the photo or video details?", isPresented: Binding(get: { askMetadata != nil }, set: { if !$0 { askMetadata = nil } }),
                             presenting: askMetadata) { item in
@@ -353,7 +428,21 @@ struct ShelfTab: View {
                 if busy.contains(item.id) { ProgressView().controlSize(.mini) }
             }
             VStack(alignment: .leading, spacing: 0) {
-                Text(item.name).font(.caption).lineLimit(1).truncationMode(.middle)
+                if renaming == item.id {
+                    HStack(spacing: 2) {
+                        TextField("Name", text: $newName)
+                            .textFieldStyle(.roundedBorder).font(.caption).controlSize(.small)
+                            .focused($nameFocused)
+                            .onSubmit { commitRename(item) }
+                            .onExitCommand { renaming = nil }
+                            .onChange(of: nameFocused) { if !nameFocused, renaming == item.id { commitRename(item) } }
+                        if !item.url.pathExtension.isEmpty {
+                            Text("." + item.url.pathExtension).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                } else {
+                    Text(item.name).font(.caption).lineLimit(1).truncationMode(.middle)
+                }
                 Text(item.exists ? Fmt.diskBytes(MediaCompressor.fileSize(item.url)) : "Moved or deleted")
                     .font(.caption2).foregroundStyle(isOn ? Color.white.opacity(0.8) : (item.exists ? Color.secondary : Color.orange))
             }
@@ -363,22 +452,36 @@ struct ShelfTab: View {
         .foregroundStyle(isOn ? Color.white : Color.primary)
         .background(isOn ? Color.accentColor : .clear, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
         .contentShape(Rectangle())
-        .onTapGesture(count: 2) { NSWorkspace.shared.open(item.url) }
-        .simultaneousGesture(TapGesture().onEnded {
-            if NSEvent.modifierFlags.contains(.command) {
-                if isOn { selected.remove(item.id) } else { selected.insert(item.id) }
-            } else { selected = [item.id] }
-        })
-        .onDrag { NSItemProvider(contentsOf: item.url) ?? NSItemProvider() }
-        .help(item.name + " · drag out to use it, double-click to open")
+        .overlay {
+            // Not while renaming: the name field needs the clicks.
+            if renaming != item.id {
+                FileRowDragSource(
+                    urls: {
+                        // A selected row drags every selected file; any other row just itself.
+                        let items = store.shown.items
+                        return isOn ? items.filter { selected.contains($0.id) }.map(\.url) : [item.url]
+                    },
+                    onClick: { command in
+                        if command { if isOn { selected.remove(item.id) } else { selected.insert(item.id) } }
+                        else { selected = [item.id] }
+                    },
+                    onDoubleClick: { NSWorkspace.shared.open(item.url) },
+                    shelf: store.shown.id)
+            }
+        }
+        .help(item.name + " · drag out to use it (selected ones go together), double-click to open, right-click to rename")
         .contextMenu { menu(item) }
     }
 
     /// Right-click on the stack: things for every file.
     private func stackMenu(_ shelf: ShelfSet) -> NSMenu? {
         let urls = shelf.items.filter(\.exists).map(\.url)
-        return NSMenu.build([
-            ClosureMenuItem(title: "Show as List") { withAnimation(.easeInOut(duration: 0.22)) { listMode = true } },
+        var items: [NSMenuItem] = [ClosureMenuItem(title: "Show as List") { withAnimation(.easeInOut(duration: 0.22)) { listMode = true } }]
+        if shelf.items.count == 1, shelf.items[0].exists {
+            let only = shelf.items[0]
+            items.append(ClosureMenuItem(title: "Rename…") { withAnimation(.easeInOut(duration: 0.22)) { listMode = true }; startRename(only) })
+        }
+        items += [
             .separator(),
             ClosureMenuItem(title: "Compress All") { compressAll(shelf.items.filter(\.exists)) },
             .separator(),
@@ -386,29 +489,63 @@ struct ShelfTab: View {
             ClosureMenuItem(title: "Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting(urls) },
             .separator(),
             ClosureMenuItem(title: "Clear Shelf") { store.clearCurrent() },
-        ])
+        ]
+        return NSMenu.build(items)
     }
 
-    /// Compresses every file (photos and videos keep their details), adds the
-    /// smaller copies, and shows the total before → after.
+    /// Compresses every file (photos and videos keep their details) into
+    /// smaller copies beside them, then shows one before → after summary and
+    /// asks what to do with the originals. Nothing is added twice meanwhile.
     private func compressAll(_ items: [ShelfItem]) {
         guard !items.isEmpty else { return }
         items.forEach { busy.insert($0.id) }
-        note = "Compressing \(items.count) files…"
         Task {
-            var before: UInt64 = 0, after: UInt64 = 0, made = 0
-            for item in items {
+            var done = BatchResult()
+            for (n, item) in items.enumerated() {
+                note = "Compressing \(n + 1) of \(items.count): \(item.name)…"
                 let url = item.url, out = MediaCompressor.outputURL(for: url, suffix: "compressed", fallback: fallbackFolder)
-                if let r = try? await MediaCompressor.compress(url, keepMetadata: true, output: out) {
-                    before += r.before; after += min(r.after, r.before)
-                    if r.url != url { store.add([r.url], original: url); made += 1 }
-                }
+                do {
+                    let r = try await MediaCompressor.compress(url, keepMetadata: true, output: out)
+                    if r.url != url, r.after < r.before {
+                        done.pairs.append(.init(original: url, copy: r.url, before: r.before, after: r.after))
+                    } else {
+                        if r.url != url { try? FileManager.default.trashItem(at: r.url, resultingItemURL: nil) }
+                        done.unchanged += 1
+                    }
+                } catch { done.failed += 1 }
                 busy.remove(item.id)
             }
             note = nil
-            lastResult = (items[0].url, MediaCompressor.Result(url: items[0].url, before: before, after: after))
-            if made == 0 { note = "Already as small as they get." }
+            if done.pairs.isEmpty {
+                note = done.failed > 0 ? "Couldn’t compress \(done.failed == 1 ? "1 file" : "\(done.failed) files"); the rest are already as small as they get."
+                                       : "Already as small as they get. Nothing was changed."
+            } else {
+                pendingBatch = done; batch = done
+            }
         }
+    }
+
+    /// The choice after Compress All. `trashOriginals` frees the space for real.
+    private func finishBatch(_ b: BatchResult, useCopies: Bool, trashOriginals: Bool = false) {
+        pendingBatch = nil; batch = nil
+        if useCopies {
+            for p in b.pairs { store.replace(path: p.original.path, with: p.copy) }
+            if trashOriginals { b.pairs.forEach { try? FileManager.default.trashItem(at: $0.original, resultingItemURL: nil) } }
+            lastResult = (b.pairs[0].original, MediaCompressor.Result(url: b.pairs[0].original, before: b.before, after: b.after))
+            note = trashOriginals ? nil : "The shelf has the smaller copies. The originals are still where they were."
+        } else {
+            b.pairs.forEach { try? FileManager.default.trashItem(at: $0.copy, resultingItemURL: nil) }
+            lastResult = nil
+            note = "Kept the originals. The smaller copies are in the Trash."
+        }
+    }
+
+    /// The summary was closed without a choice: the copies join the shelf next
+    /// to their originals (right-click one to compare).
+    private func keepBoth(_ b: BatchResult) {
+        for p in b.pairs { store.add([p.copy], original: p.original) }
+        lastResult = (b.pairs[0].original, MediaCompressor.Result(url: b.pairs[0].original, before: b.before, after: b.after))
+        note = "Kept both. Right-click a smaller copy to compare it with its original."
     }
 
     /// Keep the compressed copy: it takes the original's place on the shelf
@@ -429,8 +566,8 @@ struct ShelfTab: View {
 
     private func title(_ shelf: ShelfSet) -> String {
         switch store.open {
-        case .category: return (shelf.name ?? "Category") + " · \(shelf.items.count)"
-        case .side: return "Shelf (side) · \(shelf.items.count)"
+        case .category: return shelf.displayName + " · \(shelf.items.count)"
+        case .side: return shelf.displayName + " · \(shelf.items.count)"
         case .current: return shelf.items.isEmpty ? "Shelf" : "Shelf · \(shelf.items.count)"
         }
     }
@@ -469,8 +606,53 @@ struct ShelfTab: View {
         Divider()
         Button("Open") { NSWorkspace.shared.open(item.url) }
         Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([item.url]) }
+        Button("Rename…") { startRename(item) }.disabled(!item.exists || busy.contains(item.id))
         Divider()
         Button("Remove from Shelf") { store.remove(item) }
+    }
+
+    private func startRename(_ item: ShelfItem) {
+        selected = [item.id]
+        newName = item.baseName
+        renaming = item.id
+        DispatchQueue.main.async { nameFocused = true }
+    }
+
+    /// Renames the file on disk; the result line and comparison follow the new name.
+    private func commitRename(_ item: ShelfItem) {
+        guard renaming == item.id || renamingResult else { return }
+        renaming = nil
+        guard newName != item.baseName else { renamingResult = false; return }
+        do {
+            let to = try store.rename(item, to: newName)
+            renamingResult = false
+            if let r = lastResult {
+                lastResult = (r.original == item.url ? to : r.original,
+                              MediaCompressor.Result(url: r.result.url == item.url ? to : r.result.url, before: r.result.before, after: r.result.after))
+            }
+            note = "Renamed to \(to.lastPathComponent)."
+        } catch {
+            note = error.localizedDescription
+        }
+    }
+
+    /// Naming the compressed copy, right from the result line.
+    private func renamePopover(_ item: ShelfItem) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Name the compressed copy").font(.headline)
+            HStack(spacing: 3) {
+                TextField("Name", text: $newName).textFieldStyle(.roundedBorder).frame(width: 220)
+                    .onSubmit { commitRename(item) }
+                if !item.url.pathExtension.isEmpty { Text("." + item.url.pathExtension).foregroundStyle(.secondary) }
+            }
+            HStack {
+                Spacer()
+                Button("Cancel") { renamingResult = false }.keyboardShortcut(.cancelAction)
+                Button("Rename") { commitRename(item) }.keyboardShortcut(.defaultAction)
+                    .disabled(newName.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(14)
     }
 
     private var fallbackFolder: URL {
@@ -539,20 +721,21 @@ struct ShelfTab: View {
         Button(action: action) { Image(systemName: symbol) }.buttonStyle(.borderless).help(help)
     }
 
-    private func accept(_ providers: [NSItemProvider]) {
-        for p in providers {
-            if p.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
-                _ = p.loadObject(ofClass: URL.self) { url, _ in
-                    guard let url else { return }
-                    Task { @MainActor in ShelfStore.shared.add([url]) }
-                }
-            } else if p.canLoadObject(ofClass: NSImage.self) {
-                _ = p.loadObject(ofClass: NSImage.self) { img, _ in
-                    guard let img = img as? NSImage else { return }
-                    Task { @MainActor in ShelfStore.shared.add(image: img) }
-                }
-            }
+    /// A drop on the shelf on show, or on a kept shelf's chip (`target`). Read
+    /// from the drag pasteboard itself (files, promised files, pictures, links,
+    /// text); whatever couldn't be taken is said in the footer.
+    private func drop(into target: ShelfTarget? = nil) {
+        let target = target ?? store.open      // promised files arriving later still go where they were dropped
+        let shelfID = store.shelf(target).id
+        let waiting = ShelfDrop.receive(NSPasteboard(name: .drag), into: store.ownFolder(shelfID)) { out in
+            // Dragged out of this shelf and let go on it again: it's already here.
+            if ShelfDrag.isBackOnOwnShelf(out.files, shelf: shelfID) { return }
+            var out = out
+            let added = store.add(out.files, to: target)
+            out.duplicates = out.files.count - added
+            withAnimation(.easeInOut(duration: 0.2)) { lastResult = nil; note = out.message(added: added) }
         }
+        if waiting > 0 { lastResult = nil; note = ShelfDrop.waitingMessage(waiting, source: ShelfDrop.sourceApp()) }
     }
 }
 
@@ -733,16 +916,88 @@ private struct SessionsTab: View {
 struct SizeChange: View {
     let before: UInt64
     let after: UInt64
+    /// Tight spaces: "−73%" instead of "73% smaller".
+    var compact = false
     var body: some View {
         let pct = before > 0 ? Int(((1 - Double(after) / Double(before)) * 100).rounded()) : 0
         HStack(spacing: 4) {
             Text(Fmt.diskBytes(before)).foregroundStyle(.red).strikethrough(after < before, color: .red.opacity(0.6))
             Image(systemName: "arrow.right").font(.system(size: 8, weight: .bold)).foregroundStyle(.secondary)
             Text(Fmt.diskBytes(after)).foregroundStyle(.green).fontWeight(.semibold)
-            if pct > 0 { Text("\(pct)% smaller").foregroundStyle(.secondary) }
+            if pct > 0 { Text(compact ? "−\(pct)%" : "\(pct)% smaller").foregroundStyle(.secondary) }
         }
         .font(.caption).monospacedDigit()
+        .lineLimit(1).fixedSize()
         .help("Original \(Fmt.diskBytes(before)) → now \(Fmt.diskBytes(after))")
+    }
+}
+
+/// Compress All's results, waiting for a choice about the originals.
+struct BatchResult: Identifiable {
+    struct Pair { let original: URL, copy: URL, before: UInt64, after: UInt64 }
+    let id = UUID()
+    var pairs: [Pair] = []
+    var unchanged = 0
+    var failed = 0
+    var before: UInt64 { pairs.reduce(0) { $0 + $1.before } }
+    var after: UInt64 { pairs.reduce(0) { $0 + $1.after } }
+}
+
+/// Every file before → after, the total saved, and what to do with the originals.
+struct BatchSummary: View {
+    let batch: BatchResult
+    let useCopies: () -> Void
+    let useCopiesTrashOriginals: () -> Void
+    let keepOriginals: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Compressed \(batch.pairs.count) \(batch.pairs.count == 1 ? "file" : "files")").font(.headline)
+                SizeChange(before: batch.before, after: batch.after).font(.callout)
+                Text("Saves \(Fmt.diskBytes(batch.before - batch.after)) if you keep only the smaller copies.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            ScrollView {
+                VStack(spacing: 6) {
+                    ForEach(batch.pairs, id: \.copy) { p in
+                        HStack(spacing: 8) {
+                            ShelfThumbnail(url: p.copy).frame(width: 28, height: 24)
+                                .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                            Text(p.original.lastPathComponent).font(.caption).lineLimit(1).truncationMode(.middle)
+                            Spacer(minLength: 8)
+                            SizeChange(before: p.before, after: p.after)
+                        }
+                    }
+                }
+            }
+            .frame(maxHeight: 220)
+            if batch.unchanged + batch.failed > 0 {
+                Text([batch.unchanged > 0 ? "\(batch.unchanged) already as small as they get" : nil,
+                      batch.failed > 0 ? "\(batch.failed) couldn’t be compressed" : nil].compactMap { $0 }.joined(separator: " · ") + ", left as they are.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Divider()
+            Text("Keep the originals?").font(.subheadline.weight(.semibold))
+            VStack(alignment: .leading, spacing: 6) {
+                Button(action: useCopiesTrashOriginals) {
+                    Label("No, move them to the Trash", systemImage: "trash").frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(.borderedProminent)
+                .help("Frees \(Fmt.diskBytes(batch.before - batch.after)). The originals stay in the Trash until you empty it.")
+                Button(action: useCopies) {
+                    Label("Yes, keep them too", systemImage: "square.on.square").frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .help("The shelf shows the smaller copies; the originals stay where they are")
+                Button(action: keepOriginals) {
+                    Label("Undo, keep only the originals", systemImage: "arrow.uturn.backward").frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .help("The smaller copies go to the Trash")
+            }
+            .controlSize(.regular)
+        }
+        .padding(16)
+        .frame(width: 400)
     }
 }
 
@@ -762,43 +1017,38 @@ struct CompareView: View {
     var onDiscard: (() -> Void)? = nil
     @State private var before: [MediaInfo.Field] = []
     @State private var after: [MediaInfo.Field] = []
+    @State private var change: Double?
+    @State private var measuring = true
+
+    private static let fileLabels: Set<String> = ["File size", "Data per pixel", "Format", "Created", "Modified"]
 
     var body: some View {
         let labels = before.map(\.label) + after.map(\.label).filter { l in !before.contains { $0.label == l } }
+        let isDetail = { (l: String) in (before + after).first { $0.label == l }?.detail == true }
         let removed = MediaInfo.removed(original: before, copy: after)
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .top, spacing: 14) {
                 side("Original", pair.original, .red)
                 side("New", pair.copy, .green)
             }
+            if MediaCompressor.kind(pair.original) == .image { quality }
             if !removed.isEmpty {
                 Label("Removed: " + removed.joined(separator: ", "), systemImage: "eye.slash")
                     .font(.callout).foregroundStyle(.orange)
             }
             ScrollView {
-                Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 6) {
-                    GridRow {
-                        Text("").gridColumnAlignment(.trailing)
-                        Text("Original").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                        Text("New").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                    }
-                    ForEach(labels, id: \.self) { l in
-                        let a = before.first { $0.label == l }?.value, b = after.first { $0.label == l }?.value
-                        GridRow {
-                            Text(l).foregroundStyle(.secondary)
-                            Text(a ?? "—").foregroundStyle(l == "File size" ? Color.red : Color.primary)
-                            Group {
-                                if let b { Text(b).foregroundStyle(l == "File size" ? Color.green : (b != a ? Color.accentColor : Color.primary)) }
-                                else { Text("removed").italic().foregroundStyle(.orange) }
-                            }
-                        }
-                        .font(.callout)
-                    }
+                VStack(alignment: .leading, spacing: 12) {
+                    group("File", labels.filter { Self.fileLabels.contains($0) }, first: true)
+                    group("Picture", labels.filter { !Self.fileLabels.contains($0) && !isDetail($0) })
+                    group("Personal details", labels.filter { isDetail($0) })
                 }
                 .textSelection(.enabled)
             }
-            .frame(maxHeight: 260)
+            // A scroll view in a popover has no height of its own: give it the
+            // rows' height, up to 320 pt (then it scrolls).
+            .frame(height: min(360, CGFloat(labels.count) * 29 + 110))
             if onKeep != nil || onDiscard != nil {
+                Divider()
                 HStack {
                     Text("Keep the smaller copy?").font(.callout.weight(.medium))
                     Spacer()
@@ -807,18 +1057,76 @@ struct CompareView: View {
                 }
             }
         }
-        .padding(16)
-        .frame(width: 480)
+        .padding(18)
+        .frame(width: 500)
         .task {
             async let a = MediaInfo.read(pair.original)
             async let b = MediaInfo.read(pair.copy)
             (before, after) = await (a, b)
+            if MediaCompressor.kind(pair.original) == .image { change = await MediaInfo.visibleChange(pair.original, pair.copy) }
+            measuring = false
+        }
+    }
+
+    /// The picture-quality verdict, measured by comparing the pixels.
+    @ViewBuilder private var quality: some View {
+        HStack(spacing: 10) {
+            if measuring {
+                ProgressView().controlSize(.small)
+                Text("Comparing the pictures…").font(.callout).foregroundStyle(.secondary)
+            } else if let db = change {
+                let w = MediaInfo.changeWords(db)
+                let tint: Color = [.green, .green, .yellow, .orange][w.level]
+                Image(systemName: w.level <= 1 ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
+                    .font(.title3).foregroundStyle(tint)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Picture quality: " + w.title).font(.callout.weight(.semibold))
+                    Text(w.detail).font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Text(db.isInfinite ? "Identical" : String(format: "%.0f dB", db))
+                    .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                    .help("Peak signal-to-noise ratio between the two pictures: above 40 dB looks the same; below 30 dB the change shows")
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    /// One table row: label, original, new; whole-row stripes.
+    private func line(_ label: String, _ a: String?, _ b: String?, striped: Bool, header: Bool = false) -> some View {
+        let size = label == "File size" || label == "Data per pixel"
+        return HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(label).foregroundStyle(header ? .tertiary : .secondary).frame(width: 118, alignment: .leading)
+            Text(a ?? "—").foregroundStyle(header ? Color.secondary : size ? Color.red : Color.primary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Group {
+                if let b { Text(b).foregroundStyle(header ? Color.secondary : size ? Color.green : (b != a ? Color.accentColor : Color.primary)) }
+                else { Text("removed").italic().foregroundStyle(.orange) }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .font(header ? .caption.weight(.semibold) : .callout).lineLimit(2)
+        .padding(.horizontal, 10).padding(.vertical, header ? 2 : 5)
+        .background(striped ? Color.primary.opacity(0.05) : .clear, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+    }
+
+    @ViewBuilder private func group(_ title: String, _ labels: [String], first: Bool = false) -> some View {
+        if !labels.isEmpty {
+            VStack(alignment: .leading, spacing: 2) {
+                if first { line(title.uppercased(), "Original", "New", striped: false, header: true) }
+                else { Text(title.uppercased()).font(.caption.weight(.semibold)).foregroundStyle(.tertiary).padding(.horizontal, 10).padding(.vertical, 2) }
+                ForEach(Array(labels.enumerated()), id: \.element) { i, l in
+                    line(l, before.first { $0.label == l }?.value, after.first { $0.label == l }?.value, striped: i.isMultiple(of: 2))
+                }
+            }
         }
     }
 
     private func side(_ title: String, _ url: URL, _ tint: Color) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            ShelfThumbnail(url: url).frame(width: 214, height: 140).clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            ShelfThumbnail(url: url).frame(width: 225, height: 150).clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(tint.opacity(0.6), lineWidth: 1.5))
                 .onTapGesture(count: 2) { NSWorkspace.shared.open(url) }
             HStack {
@@ -828,6 +1136,6 @@ struct CompareView: View {
             }
             Text(url.lastPathComponent).font(.caption2).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
         }
-        .frame(width: 214)
+        .frame(width: 225)
     }
 }
