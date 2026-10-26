@@ -484,14 +484,14 @@ History and Startup stay this Mac's. Apex always opens on this Mac.
 | Buttons | Free Up Memory, Disk › Clean, a Performance page (`perfItem`), or a section |
 | Commands | `ApexAgent.command`: a quit word (quit, close, exit, kill, end, stop, terminate, shut, force) not at the start of a question; "all / everything / apps…" = every open app (`NSWorkspace.runningApplications`, regular, not Finder or Apex) minus any named after "except / but / besides…"; otherwise apps named by their full name or any distinctive word. "process(es)": your own non-app processes (same user, not in /System or /usr/libexec, not Dock, WindowServer…). Nothing happens until the button: `terminate()` (apps ask to save) or `forceTerminate()` when "force" was said; processes `SIGTERM`, only if still yours |
 
-## Assistant (Claude)
+## Assistant (cloud AI providers)
 
 | Value | Source |
 |---|---|
-| Service | Anthropic Messages API, `POST https://api.anthropic.com/v1/messages`, `anthropic-version: 2026-10-21`, the user's API key (`x-api-key`) from the login Keychain (service "Apex Activity Manager", account `anthropic-api-key`) |
-| Key check | `GET /v1/models?limit=1` when the key is entered (costs nothing); 401 → "didn't accept this API key" |
-| Models | Claude Opus 5.5 (default), Sonnet 5.5, Haiku 5.5; the choice is kept (`assistantCloudModel`) |
-| Answers | `stream: true` (server-sent events), `max_tokens` 16000, adaptive thinking with summarized display (the "Thinking" line), effort medium, prompt caching on, no sampling settings (removed in 2026-10-21). Opus/Sonnet: `fallbacks: "default"` with beta `server-side-fallback-2026-07-01`, so a declined question is retried on Anthropic's recommended model |
+| Service | The provider the user picked, with their own key: Anthropic (Messages API), Google Gemini, Mistral, OpenAI, OpenRouter, or any OpenAI-compatible address (`AIProviders.swift`). Keys are named and grouped by the user; each secret is in the login Keychain, never in settings |
+| Key check | The provider's model list when the key is saved (costs nothing); 401 → "didn't accept this API key". Models come from that list, not a built-in one |
+| Models | From the provider's list; the choice is kept per key |
+| Answers (Anthropic) | `stream: true` (server-sent events), `max_tokens` 16000, adaptive thinking with summarized display (the "Thinking" line), effort medium, prompt caching on, no sampling settings (removed in 2026-10-21). Opus/Sonnet: `fallbacks: "default"` with beta `server-side-fallback-2026-07-01`, so a declined question is retried on Anthropic's recommended model |
 | History | Every turn is sent back unchanged (thinking blocks and signatures included, citations stripped from text); a turn that fails or is stopped is removed with its question, which goes back into the box. New Chat clears it |
 | Context | With readings on (the gauge button, `assistantReadings`), each question carries Apex's live readings as plain text before it (`AssistantContext.build`): Mac, CPU, memory and pressure, swap, startup disk, network, GPU, battery, five busiest and largest apps (names), five latest alerts. No files or passwords. This leaves the Mac, and the UI says so |
 | Errors | Error types → plain words (key, billing, rate limit, overloaded, too long); `stop_reason` refusal / max_tokens → a short note |

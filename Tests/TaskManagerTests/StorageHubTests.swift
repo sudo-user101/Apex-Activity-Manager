@@ -1054,11 +1054,11 @@ final class MachineTests: XCTestCase {
 
     /// Real output from Docker (Colima) on this Mac.
     func testParsesRealDockerOutput() {
-        let stats = LocalDocker.parseStats(#"{"BlockIO":"34.6MB / 200MB","CPUPerc":"0.42%","Container":"dd76415fa4dc2cd89a62eb6cca6e4737664dda46df295a55a5ab7f9c915535ef","ID":"dd76415fa4dc","MemPerc":"10.90%","MemUsage":"425.8MiB / 3.813GiB","Name":"staybnb-sqlserver","NetIO":"302kB / 207kB","PIDs":"132"}"#)
-        let ps = #"{"ID":"dd76415fa4dc","Image":"mcr.microsoft.com/azure-sql-edge:latest","Names":"staybnb-sqlserver","State":"running","Status":"Up 56 minutes (healthy)"}"# + "\n" +
+        let stats = LocalDocker.parseStats(#"{"BlockIO":"34.6MB / 200MB","CPUPerc":"0.42%","Container":"dd76415fa4dc2cd89a62eb6cca6e4737664dda46df295a55a5ab7f9c915535ef","ID":"dd76415fa4dc","MemPerc":"10.90%","MemUsage":"425.8MiB / 3.813GiB","Name":"shop-database","NetIO":"302kB / 207kB","PIDs":"132"}"#)
+        let ps = #"{"ID":"dd76415fa4dc","Image":"mcr.microsoft.com/azure-sql-edge:latest","Names":"shop-database","State":"running","Status":"Up 56 minutes (healthy)"}"# + "\n" +
                  #"{"ID":"aa11bb22cc33","Image":"alpine","Names":"old","State":"exited","Status":"Exited (0) 2 days ago"}"#
         let c = LocalDocker.parseContainers(ps, stats: stats)
-        XCTAssertEqual(c.map(\.name), ["staybnb-sqlserver", "old"], "running first")
+        XCTAssertEqual(c.map(\.name), ["shop-database", "old"], "running first")
         XCTAssertEqual(c[0].cpu, "0.42%"); XCTAssertEqual(c[0].memory, "425.8MiB / 3.813GiB")
         XCTAssertNil(c[1].cpu)
         // `docker top` (header, VM ids) and the container's own ps.
