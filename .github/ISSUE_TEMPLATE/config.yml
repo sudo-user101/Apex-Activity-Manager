@@ -1,5 +1,5 @@
 blank_issues_enabled: false
 contact_links:
   - name: Report a security vulnerability
-    url: https://github.com/sudo-user101/Apex-Activity-Manager/security/policy
+    url: https://github.com/sudo-user101/Apex-Activity-Manager-MacOSX/security/policy
     about: Please report security problems privately, not as a public issue.

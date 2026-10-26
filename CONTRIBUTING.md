@@ -8,10 +8,10 @@ lot.
 
 ## Ways to help
 
-- **Report bugs.** Use the [bug report form](https://github.com/sudo-user101/Apex-Activity-Manager/issues/new?template=bug_report.yml):
+- **Report bugs.** Use the [bug report form](https://github.com/sudo-user101/Apex-Activity-Manager-MacOSX/issues/new?template=bug_report.yml):
   your Apex and macOS versions, your Mac model, and the steps to make it
   happen. A screenshot (with anything personal hidden) helps most.
-- **Suggest features.** Use the [feature request form](https://github.com/sudo-user101/Apex-Activity-Manager/issues/new?template=feature_request.yml)
+- **Suggest features.** Use the [feature request form](https://github.com/sudo-user101/Apex-Activity-Manager-MacOSX/issues/new?template=feature_request.yml)
   and start from the problem you have ("my Mac gets slow every afternoon
   and I can't tell why") rather than a solution. Problems lead to better
   features.
@@ -24,7 +24,7 @@ lot.
 - **Report security problems privately**, as described in the
   [security policy](SECURITY.md), not as public issues.
 
-Before opening an issue, search the [open issues](https://github.com/sudo-user101/Apex-Activity-Manager/issues):
+Before opening an issue, search the [open issues](https://github.com/sudo-user101/Apex-Activity-Manager-MacOSX/issues):
 adding your details to an existing one is better than a duplicate.
 
 ## Pull requests
@@ -46,7 +46,7 @@ happy to give, and don't paste code or text you don't have the right to share.
 You're welcome to build Apex from source for your own use (see
 [Build from source](README.md#build-from-source)). Please don't publish
 builds or copies; point people to the
-[releases page](https://github.com/sudo-user101/Apex-Activity-Manager/releases/latest)
+[releases page](https://github.com/sudo-user101/Apex-Activity-Manager-MacOSX/releases/latest)
 instead.
 
 ## Be kind

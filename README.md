@@ -10,7 +10,7 @@ See what's happening, understand why, and fix it: processes, performance,
 storage, drives, battery and network in one light, native app.
 By **CyberNet Labs**, designed and built by [**sudo-user**](https://github.com/sudo-user101).
 
-<a href="https://github.com/sudo-user101/Apex-Activity-Manager/releases/latest"><img src="https://img.shields.io/badge/Download%20latest-for%20macOS-0A84FF?style=for-the-badge&logo=apple&logoColor=white" height="44" alt="Download the latest Apex Activity Manager for macOS" /></a>
+<a href="https://github.com/sudo-user101/Apex-Activity-Manager-MacOSX/releases/latest"><img src="https://img.shields.io/badge/Download%20latest-for%20macOS-0A84FF?style=for-the-badge&logo=apple&logoColor=white" height="44" alt="Download the latest Apex Activity Manager for macOS" /></a>
 
 ![Platform](https://img.shields.io/badge/platform-macOS%2014%2B-000000?logo=apple&logoColor=white)
 ![Swift](https://img.shields.io/badge/Swift-SwiftUI%20%2B%20AppKit-F05138?logo=swift&logoColor=white)
@@ -253,7 +253,7 @@ verification afterwards.
 ## Install
 
 1. Download the latest **.dmg** from
-   [Releases](https://github.com/sudo-user101/Apex-Activity-Manager/releases/latest).
+   [Releases](https://github.com/sudo-user101/Apex-Activity-Manager-MacOSX/releases/latest).
 2. Open it and drag **Apex Activity Manager** onto **Applications**.
 3. Version 1.3.0 isn't notarized: the first time, macOS may say it can't check
    the app. Open **System Settings › Privacy & Security** and click
@@ -337,7 +337,7 @@ never be the thing that stops you.
 
 ## Roadmap
 
-See the [open issues](https://github.com/sudo-user101/Apex-Activity-Manager/issues) for what's being worked on next.
+See the [open issues](https://github.com/sudo-user101/Apex-Activity-Manager-MacOSX/issues) for what's being worked on next.
 
 - The **Windows** edition ([Apex for Windows](https://github.com/sudo-user101/Apex-Activity-Manager-for-Windows))
   reaching everything this one does, and a **Linux desktop** edition.
@@ -366,7 +366,7 @@ summary and the license ever differ, the license applies.
 
 ## Help and feedback
 
-- [Report a bug or suggest a feature](https://github.com/sudo-user101/Apex-Activity-Manager/issues/new/choose)
+- [Report a bug or suggest a feature](https://github.com/sudo-user101/Apex-Activity-Manager-MacOSX/issues/new/choose)
 - [Security policy](SECURITY.md): what the helper does and how to report a vulnerability
 - [Contributing](CONTRIBUTING.md)
 

@@ -8,7 +8,7 @@ your password, and how to report a security problem.
 
 Please **don't open a public issue** for a security problem. Report it
 privately on GitHub: open the repository's **Security** tab and click
-**Report a vulnerability** ([direct link](https://github.com/sudo-user101/Apex-Activity-Manager/security/advisories/new)).
+**Report a vulnerability** ([direct link](https://github.com/sudo-user101/Apex-Activity-Manager-MacOSX/security/advisories/new)).
 
 Include the Apex version, your macOS version and Mac model, what an attacker
 could do, and the steps to reproduce it. You'll get a reply in the same

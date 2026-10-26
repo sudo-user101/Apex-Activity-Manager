@@ -6,7 +6,7 @@ body:
     attributes:
       value: |
         Thanks for taking the time. The more exact the details, the faster it can be fixed.
-        **Security problems:** please don't post them here; see the [security policy](https://github.com/sudo-user101/Apex-Activity-Manager/security/policy).
+        **Security problems:** please don't post them here; see the [security policy](https://github.com/sudo-user101/Apex-Activity-Manager-MacOSX/security/policy).
   - type: input
     id: apex-version
     attributes:
