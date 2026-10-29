@@ -169,15 +169,33 @@ final class ChargeLimiter {
         else { method = nil }
     }
 
-    static func batteryPercent() -> Int? {
+    static func batteryPercent() -> Int? { battery().percent }
+
+    /// Charge, whether the adapter is plugged in, and the battery's current in
+    /// mA (negative = the battery is supplying power).
+    static func battery() -> (percent: Int?, external: Bool?, amperage: Int?) {
         let svc = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSmartBattery"))
-        guard svc != 0 else { return nil }
+        guard svc != 0 else { return (nil, nil, nil) }
         defer { IOObjectRelease(svc) }
-        func int(_ k: String) -> Int? {
-            (IORegistryEntryCreateCFProperty(svc, k as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? NSNumber)?.intValue
+        func number(_ k: String) -> NSNumber? {
+            IORegistryEntryCreateCFProperty(svc, k as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? NSNumber
         }
-        guard let cur = int("CurrentCapacity"), let max = int("MaxCapacity"), max > 0 else { return nil }
-        return max == 100 ? cur : cur * 100 / max
+        var percent: Int?
+        if let cur = number("CurrentCapacity")?.intValue, let max = number("MaxCapacity")?.intValue, max > 0 {
+            percent = max == 100 ? cur : cur * 100 / max
+        }
+        // The registry keeps negative currents as unsigned 64-bit numbers.
+        let amps = (number("InstantAmperage") ?? number("Amperage")).map { Int(truncatingIfNeeded: Int64(bitPattern: $0.uint64Value)) }
+        return (percent, number("ExternalConnected")?.boolValue, amps)
+    }
+
+    /// Something else (another battery app, an old helper killed mid-hold)
+    /// may have disconnected the adapter with CHIE. While charging is paused
+    /// the adapter must power the Mac: connect it again. True = it was off.
+    func keepAdapterConnected() -> Bool {
+        guard FanControl.shouldReconnectAdapter(method: method?.name, chie: smc.exists("CHIE") ? smc.readBytes("CHIE") : nil) else { return false }
+        smc.writeBytes("CHIE", [0x00])
+        return true
     }
 
     private func writes(_ want: Bool) -> [(String, [UInt8])] {
@@ -227,10 +245,21 @@ guard getuid() == 0 else { FileHandle.standardError.write("apex-fanhelper must r
 guard let smc = SMC() else { FileHandle.standardError.write("AppleSMC unavailable\n".data(using: .utf8)!); exit(1) }
 let temps = Temperatures()
 let charger = ChargeLimiter(smc: smc)
-// A previous run may have been killed while holding: always start from normal charging.
+// A previous run may have been killed while holding: always start from normal charging
+// (the loop pauses again straight away if the limit says so).
 charger.release()
+// What happened while the Mac was off (the record is written at shutdown).
+let whileOff: String? = {
+    defer { try? FileManager.default.removeItem(atPath: FanControl.offRecordPath) }
+    guard let d = FileManager.default.contents(atPath: FanControl.offRecordPath) else { return nil }
+    let dec = JSONDecoder(); dec.dateDecodingStrategy = .secondsSince1970
+    return FanControl.whileOffNote(try? dec.decode(FanControl.OffRecord.self, from: d), nowPercent: ChargeLimiter.batteryPercent())
+}()
 var tick = 0
 var chargeMessage: String?
+var lastLimit: Int?
+var adapterRestored = false
+var poweringSince: Date?
 var lastGoodConfig: FanControl.Config?
 var consumedOverride: Date?
 var asleep = false
@@ -321,7 +350,23 @@ if sleepDisabled { setSleepDisabled(false) }   // left over from a helper that w
 for sig in [SIGTERM, SIGINT, SIGHUP] {
     signal(sig, SIG_IGN)
     let src = DispatchSource.makeSignalSource(signal: sig, queue: .main)
-    src.setEventHandler { releaseAll(); charger.release(); setSleepDisabled(false); exit(0) }
+    src.setEventHandler {
+        releaseAll(); setSleepDisabled(false)
+        // Shutting down (or updating): leave a paused charge paused, so firmware that keeps the
+        // setting doesn't charge while the Mac is off; note the level to compare after restart.
+        // Removing the helper deletes the settings file first, so charging goes back to normal then.
+        let configPresent = FileManager.default.fileExists(atPath: FanControl.configPath)
+        let keep = FanControl.keepPausedOnExit(method: charger.method?.name, configPresent: configPresent,
+                                               blocked: charger.blocked, limit: lastLimit)
+        if !keep { charger.release() }
+        if configPresent, let p = ChargeLimiter.batteryPercent() {
+            let e = JSONEncoder(); e.dateEncodingStrategy = .secondsSince1970
+            if let d = try? e.encode(FanControl.OffRecord(percent: p, at: Date(), limit: lastLimit, paused: keep)) {
+                try? d.write(to: URL(fileURLWithPath: FanControl.offRecordPath), options: .atomic)
+            }
+        }
+        exit(0)
+    }
     src.resume()
     _ = Unmanaged.passRetained(src as AnyObject)
 }
@@ -338,7 +383,8 @@ timer.setEventHandler {
 
     // Battery limit: enforced whether or not Apex is open (checked every 10 s).
     if tick % 5 == 0 && !asleep {
-        let percent = ChargeLimiter.batteryPercent()
+        let battery = ChargeLimiter.battery()
+        let percent = battery.percent
         // "Charge to 100% now" ends once the battery is full.
         let override = FanControl.overrideActive(until: raw?.chargeOverrideUntil, consumed: consumedOverride)
         if let o = override, (percent ?? 0) >= 100 { consumedOverride = o }
@@ -346,8 +392,13 @@ timer.setEventHandler {
         // Schedules can raise (full charge) or set the limit for a window.
         var limit = raw.flatMap { FanControl.effectiveLimit($0, overrideActive: overrideNow != nil).limit }
         if let l = limit, !FanControl.chargeLimitRange.contains(l) { limit = nil }
-        let want = FanControl.shouldBlockCharging(percent: percent, limit: limit, overrideUntil: overrideNow,
-                                                  currentlyBlocked: charger.blocked)
+        lastLimit = limit
+        let limitWants = FanControl.shouldBlockCharging(percent: percent, limit: limit, overrideUntil: overrideNow,
+                                                        currentlyBlocked: charger.blocked)
+        // The power adapter powers the Mac at the limit: a firmware that can only stop
+        // charging by disconnecting it ("hold") is used only if the person allowed that.
+        let mayBlock = FanControl.mayBlock(method: charger.method?.name, holdOnBattery: raw?.holdOnBattery)
+        let want = limitWants && mayBlock
         if charger.method == nil {
             chargeMessage = limit == nil ? nil : "This Mac’s firmware doesn’t allow charge control."
         } else if want != charger.blocked || (want && !charger.firmwareBlocked) {
@@ -355,8 +406,16 @@ timer.setEventHandler {
             if charger.set(blocked: want) { chargeMessage = nil }
             else { chargeMessage = "macOS refused the charging change on this Mac."; charger.release() }
         }
+        if charger.blocked && charger.keepAdapterConnected() { adapterRestored = true }
+        // Plugged in but running on battery for 30 s or more (seen every 10 s).
+        let draining = FanControl.drainingOnAdapter(externalConnected: battery.external, amperageMA: battery.amperage)
+        poweringSince = draining ? (poweringSince ?? Date()) : nil
         writeStatus(.init(updated: Date(), fanTargets: lastTarget, chargeMethod: charger.method?.name,
-                          chargingBlocked: charger.blocked, batteryPercent: percent, message: chargeMessage))
+                          chargingBlocked: charger.blocked, batteryPercent: percent, message: chargeMessage,
+                          onAdapter: battery.external, batteryPowering: poweringSince.map { Date().timeIntervalSince($0) >= 30 },
+                          adapterRestored: adapterRestored ? true : nil,
+                          limitNotHeld: limitWants && !mayBlock ? true : nil, whileOff: whileOff,
+                          helperVersion: FanControl.helperVersion))
     }
     tick &+= 1
 

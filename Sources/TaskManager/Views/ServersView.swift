@@ -16,6 +16,12 @@ final class ServerStore {
     private(set) var diskReadHistory: [UUID: [Double]] = [:]
     private(set) var diskWriteHistory: [UUID: [Double]] = [:]
     private(set) var gpuHistory: [UUID: [Double]] = [:]
+    /// All Servers added up (`FleetTotals`), and 5 minutes of it for the graphs.
+    private(set) var fleet = FleetTotals()
+    private(set) var fleetCPU: [Double] = []
+    private(set) var fleetMemory: [Double] = []
+    private(set) var fleetIn: [Double] = []
+    private(set) var fleetOut: [Double] = []
     @ObservationIgnored private(set) var diskHistory: [UUID: [String: [(Date, Int64)]]] = [:]
     private(set) var connecting = Set<UUID>()
     /// When each was last read (the report collector skips ones read just now).
@@ -40,6 +46,24 @@ final class ServerStore {
     /// A saved server, or a running container on this Mac.
     func config(_ id: UUID) -> ServerConfig? {
         servers.first { $0.id == id } ?? localContainers.lazy.map(ServerConfig.local).first { $0.id == id }
+    }
+
+    /// Online, connecting, offline (and why), or another problem.
+    func status(_ s: ServerConfig) -> ServerReach.Status {
+        if connecting.contains(s.id) && snapshots[s.id] == nil { return .connecting }
+        guard let e = errors[s.id] else { return snapshots[s.id] != nil ? .online : .connecting }
+        switch e {
+        case .unreachable, .hostUnknown, .refused:
+            let l = ServerReach.local()
+            if e == .unreachable || l.nets.isEmpty { return .offline(ServerReach.reason(host: s.host, name: s.name, nets: l.nets, vpn: l.vpn)) }
+            return .offline(e.message)
+        default: return .problem(e.message)
+        }
+    }
+
+    /// A container on this Mac as Docker lists it (running, paused, exited…).
+    func localContainer(_ s: ServerConfig) -> ServerSnapshot.Container? {
+        s.isLocal ? localContainers.first { $0.name == s.container } : nil
     }
 
     func title(_ t: MachineTarget) -> String {
@@ -68,7 +92,29 @@ final class ServerStore {
         lastRead[s.id] = Date()
         switch r {
         case .success(let snap):
+            accept(s, snap)
+        case .failure(let e):
+            errors[s.id] = e
+            ServerReports.shared.recordDown(s)
+        }
+    }
+
+    /// Keeps a reading: graphs, the report's minute log, what's learned from it.
+    /// (Tests and screenshots hand it readings directly.)
+    func accept(_ s: ServerConfig, _ snap: ServerSnapshot) {
+        do {
             snapshots[s.id] = snap; errors[s.id] = nil
+            // Server Edition: learn the key pin (servers paired before 1.1), and
+            // keep up with a renewed certificate (same key).
+            if s.isEdition, let i = servers.firstIndex(where: { $0.id == s.id }) {
+                let seen = ServerEdition.seen(s)
+                if servers[i].keyPin == nil, let k = seen.key, seen.fingerprint == s.fingerprint { servers[i].keyPin = k; save() }
+                if let f = seen.fingerprint, f != servers[i].fingerprint, seen.key != nil, seen.key == servers[i].keyPin { servers[i].fingerprint = f; save() }
+            }
+            if MachinePower.kind(s) == .server, let mac = MachinePower.pickMAC(snap.network),
+               let i = servers.firstIndex(where: { $0.id == s.id }), servers[i].mac != mac {
+                servers[i].mac = mac; save()
+            }
             ServerReports.shared.record(s, snap)
             push(&cpuHistory, s.id, snap.cpu.total)
             push(&memHistory, s.id, snap.memory.percent)
@@ -84,11 +130,11 @@ final class ServerStore {
                 dh[d.mount] = Array(h.suffix(24 * 60))
             }
             diskHistory[s.id] = dh
-        case .failure(let e):
-            errors[s.id] = e
-            ServerReports.shared.recordDown(s)
         }
     }
+
+    /// Marks it offline (tests and screenshots).
+    func markDown(_ s: ServerConfig, _ e: ServerError) { errors[s.id] = e; snapshots[s.id] = nil }
 
     /// For the Report tab: every saved server and running container on this
     /// Mac, once a minute while Apex is open (ones the app is showing are
@@ -113,6 +159,16 @@ final class ServerStore {
         await withTaskGroup(of: Void.self) { g in
             for s in servers { g.addTask { await self.refresh(s) } }
         }
+        updateFleet()
+    }
+
+    /// Every saved server added up, and a point on the fleet graphs.
+    func updateFleet() {
+        let up = servers.filter { errors[$0.id] == nil }.compactMap { snapshots[$0.id] }
+        fleet = FleetTotals.make(up, offline: servers.count - up.count)
+        func add(_ a: inout [Double], _ v: Double) { a.append(v); a = Array(a.suffix(60)) }
+        add(&fleetCPU, fleet.cpu); add(&fleetMemory, fleet.memoryPercent)
+        add(&fleetIn, fleet.netIn); add(&fleetOut, fleet.netOut)
     }
 
     /// The containers on this Mac.
@@ -159,10 +215,18 @@ struct MachinePicker: View {
             choice(.mac)
             choice(.allContainers)
             if !store.servers.isEmpty {
-                Section("Servers") { ForEach(store.servers) { choice(.server($0.id), name: $0.name) } }
+                Section("Servers") {
+                    ForEach(store.servers) { s in
+                        choice(.server(s.id), name: StatusDot.isOffline(store.status(s)) ? "\(s.name) (offline)" : s.name)
+                    }
+                }
             }
-            if !store.localConfigs.isEmpty {
-                Section("Containers on this Mac") { ForEach(store.localConfigs) { choice(.server($0.id), name: $0.name) } }
+            if !store.localContainers.isEmpty {
+                Section("Containers on this Mac") {
+                    ForEach(store.localContainers) { c in
+                        choice(.server(ServerConfig.local(c).id), name: c.running ? c.name : "\(c.name) (\(c.state))")
+                    }
+                }
             }
             Divider()
             Button { adding = true } label: { Label("Add Server…", systemImage: "plus") }
@@ -225,11 +289,19 @@ struct RemotePage: View {
     var body: some View {
         switch model.target {
         case .mac: EmptyView()
-        case .allServers: if section == .report { FleetReportView(containers: false) } else { ServersOverview() }
+        case .allServers:
+            if section == .report { FleetReportView(containers: false) }
+            else if section == .sites { SitesView(serverID: nil) }
+            else if section == .docker { DockerView(serverID: nil) }
+            else { ServersOverview() }
         case .allContainers: if section == .report { FleetReportView(containers: true) } else { ContainersOverview() }
         case .server(let id):
             if section == .report {
                 ReportView(id: id)
+            } else if section == .sites, store.config(id) != nil {
+                SitesView(serverID: id)
+            } else if section == .docker, store.config(id) != nil {
+                DockerView(serverID: id)
             } else if let s = store.config(id) {
                 switch section {
                 case .processes: RemoteProcessesView(server: s)
@@ -299,6 +371,14 @@ struct ServersOverview: View {
     private let store = ServerStore.shared
     @State private var adding = false
     @State private var editing: ServerConfig?
+    @AppStorage("serversAsCards") private var asCards = false
+
+    @ViewBuilder private func menu(_ s: ServerConfig) -> some View {
+        Button("Show") { model.target = .server(s.id) }
+        Button("Edit…") { editing = s }
+        Divider()
+        Button("Remove", role: .destructive) { store.remove(s) }
+    }
 
     var body: some View {
         if store.servers.isEmpty {
@@ -322,25 +402,196 @@ struct ServersOverview: View {
                                 .foregroundStyle(.secondary)
                         }
                         Spacer()
-                        Button { adding = true } label: { Label("Add Server", systemImage: "plus") }
-                    }
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 300), spacing: 14)], spacing: 14) {
-                        ForEach(store.servers) { s in
-                            ServerCard(server: s)
-                                .onTapGesture { model.target = .server(s.id) }
-                                .contextMenu {
-                                    Button("Show") { model.target = .server(s.id) }
-                                    Button("Edit…") { editing = s }
-                                    Divider()
-                                    Button("Remove", role: .destructive) { store.remove(s) }
-                                }
+                        Picker("Show as", selection: $asCards) {
+                            Image(systemName: "list.bullet").help("List").tag(false)
+                            Image(systemName: "square.grid.2x2").help("Cards").tag(true)
                         }
+                        .pickerStyle(.segmented).labelsHidden().fixedSize()
+                        Button { adding = true } label: { Image(systemName: "plus") }.help("Add Server")
+                    }
+                    FleetSummary()
+                    if asCards {
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 300), spacing: 14)], spacing: 14) {
+                            ForEach(store.servers) { s in
+                                ServerCard(server: s)
+                                    .onTapGesture { model.target = .server(s.id) }
+                                    .contextMenu { menu(s) }
+                            }
+                        }
+                    } else {
+                        FleetList(edit: { editing = $0 })
                     }
                 }
                 .padding(24)
             }
             .sheet(isPresented: $adding) { AddServerSheet() }
             .sheet(item: $editing) { s in ServerEditor(server: s) { store.update($0) } }
+        }
+    }
+}
+
+/// All Servers added up: CPU (weighted by cores), memory, network and disk,
+/// with the last 5 minutes.
+private struct FleetSummary: View {
+    private let store = ServerStore.shared
+
+    var body: some View {
+        let t = store.fleet
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Text("ALL SERVERS COMBINED").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                Spacer()
+                Text("\(t.online) online" + (t.offline > 0 ? " · \(t.offline) offline" : "") + " · \(t.cores) cores · \(t.processes) processes")
+                    .font(.caption).foregroundStyle(t.offline > 0 ? .red : .secondary)
+            }
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 220), spacing: 12)], spacing: 12) {
+                tile("CPU", String(format: "%.0f%%", t.cpu), "of \(t.cores) cores",
+                     [.init(values: store.fleetCPU, color: .messageBlue)], max: 100, unit: .percent)
+                tile("Memory", String(format: "%.0f%%", t.memoryPercent), "\(Fmt.bytes(UInt64(t.memoryUsed))) of \(Fmt.bytes(UInt64(t.memoryTotal)))",
+                     [.init(values: store.fleetMemory, color: .windowsBlue)], max: 100, unit: .percent)
+                tile("Network", "↓ \(Fmt.rate(t.netIn))", "↑ \(Fmt.rate(t.netOut))",
+                     [.init(values: store.fleetIn, color: .orange), .init(values: store.fleetOut, color: .messageBlue, fill: false)], max: nil, unit: .rate)
+                diskTile(t)
+            }
+        }
+    }
+
+    private func tile(_ title: String, _ value: String, _ detail: String, _ series: [GraphSeries], max: Double?, unit: GraphUnit) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(title).font(.headline)
+                Spacer()
+                Text(value).font(.title3.weight(.semibold)).monospacedDigit()
+            }
+            Text(detail).font(.caption).foregroundStyle(.secondary).monospacedDigit().lineLimit(1)
+            LineGraph(series: series, maxValue: max, gridLines: false, cornerRadius: 4)
+                .environment(\.graphUnit, unit)
+                .frame(height: 54)
+        }
+        .padding(12)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private func diskTile(_ t: FleetTotals) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Disk").font(.headline)
+                Spacer()
+                Text(String(format: "%.0f%%", t.diskPercent)).font(.title3.weight(.semibold)).monospacedDigit()
+            }
+            Text("\(Fmt.bytes(UInt64(max(0, t.diskTotal - t.diskUsed)))) free of \(Fmt.bytes(UInt64(t.diskTotal)))")
+                .font(.caption).foregroundStyle(.secondary).monospacedDigit().lineLimit(1)
+            Spacer(minLength: 0)
+            ProgressView(value: min(100, t.diskPercent), total: 100)
+                .tint(t.diskPercent > 90 ? .red : t.diskPercent > 75 ? .orange : .accentColor)
+        }
+        .padding(12)
+        .frame(minHeight: 112)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 12))
+    }
+}
+
+/// Every saved server in one list, sortable by clicking a column.
+private struct FleetList: View {
+    @Environment(AppModel.self) private var model
+    private let store = ServerStore.shared
+    var edit: (ServerConfig) -> Void
+    @AppStorage("serversSort") private var sort = "name"
+
+    private func value(_ s: ServerConfig, _ key: String) -> Double {
+        guard let snap = store.snapshots[s.id], store.errors[s.id] == nil else { return -1 }
+        switch key {
+        case "cpu": return snap.cpu.total
+        case "memory": return snap.memory.percent
+        case "disk": return snap.disks.filter { $0.total > 0 }.map(\.percent).max() ?? 0
+        case "network": return snap.network.reduce(0) { $0 + $1.inPerSec + $1.outPerSec }
+        default: return 0
+        }
+    }
+
+    private var rows: [ServerConfig] {
+        sort == "name" ? store.servers.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+                       : store.servers.sorted { value($0, sort) > value($1, sort) }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                column("Server", "name").frame(maxWidth: .infinity, alignment: .leading)
+                column("CPU", "cpu").frame(width: 110, alignment: .leading)
+                column("Memory", "memory").frame(width: 110, alignment: .leading)
+                column("Disk", "disk").frame(width: 110, alignment: .leading)
+                column("Network", "network").frame(width: 130, alignment: .leading)
+                Text("Up").frame(width: 70, alignment: .leading)
+            }
+            .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            .padding(.horizontal, 12).padding(.vertical, 6)
+            Divider()
+            ForEach(rows) { s in
+                row(s)
+                    .contentShape(Rectangle())
+                    .onTapGesture { model.target = .server(s.id) }
+                    .contextMenu {
+                        Button("Show") { model.target = .server(s.id) }
+                        Button("Edit…") { edit(s) }
+                        Divider()
+                        Button("Remove", role: .destructive) { store.remove(s) }
+                    }
+                Divider().opacity(0.5)
+            }
+        }
+        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private func column(_ title: String, _ key: String) -> some View {
+        Button { sort = key } label: {
+            HStack(spacing: 3) {
+                Text(title)
+                if sort == key { Image(systemName: key == "name" ? "chevron.up" : "chevron.down").font(.caption2) }
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func row(_ s: ServerConfig) -> some View {
+        let snap = store.snapshots[s.id], error = store.errors[s.id]
+        return HStack(spacing: 10) {
+            HStack(spacing: 8) {
+                StatusDot(status: store.status(s))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(s.name).lineLimit(1)
+                    Text(StatusDot.text(store.status(s)) ?? snap?.os ?? s.target).font(.caption)
+                        .foregroundStyle(StatusDot.color(store.status(s)) == .green ? .secondary : StatusDot.color(store.status(s))).lineLimit(1)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            if let snap, error == nil {
+                bar(snap.cpu.total, String(format: "%.0f%%", snap.cpu.total), history: store.cpuHistory[s.id] ?? []).frame(width: 110, alignment: .leading)
+                bar(snap.memory.percent, Fmt.bytes(UInt64(snap.memory.used)), history: nil).frame(width: 110, alignment: .leading)
+                let d = snap.disks.filter { $0.total > 0 }.max { $0.percent < $1.percent }
+                bar(d?.percent ?? 0, d.map { "\(Fmt.bytes(UInt64($0.free))) free" } ?? "–", history: nil).frame(width: 110, alignment: .leading)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("↓ " + Fmt.rate(snap.network.reduce(0) { $0 + $1.inPerSec }))
+                    Text("↑ " + Fmt.rate(snap.network.reduce(0) { $0 + $1.outPerSec }))
+                }
+                .font(.caption).monospacedDigit().frame(width: 130, alignment: .leading)
+                Text(Fmt.duration(snap.uptime)).font(.caption).foregroundStyle(.secondary).lineLimit(1).frame(width: 70, alignment: .leading)
+            } else {
+                Text(store.connecting.contains(s.id) ? "Connecting…" : "–").font(.caption).foregroundStyle(.secondary)
+                    .frame(width: 110 * 3 + 130 + 70 + 40, alignment: .leading)
+            }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        .opacity(StatusDot.isOffline(store.status(s)) ? 0.55 : 1)
+        .help(StatusDot.text(store.status(s)) ?? "")
+    }
+
+    private func bar(_ percent: Double, _ label: String, history: [Double]?) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(label).font(.caption).monospacedDigit().lineLimit(1)
+            ProgressView(value: min(100, max(0, percent)), total: 100)
+                .tint(percent > 90 ? .red : percent > 75 ? .orange : .accentColor)
+                .frame(width: 90)
         }
     }
 }
@@ -363,8 +614,8 @@ private struct ServerCard: View {
                 Spacer()
                 status(snap)
             }
-            if let e = store.errors[server.id] {
-                Text(e.message).font(.caption).foregroundStyle(.orange).lineLimit(3).fixedSize(horizontal: false, vertical: true)
+            if store.errors[server.id] != nil, let t = StatusDot.text(store.status(server)) {
+                Text(t).font(.caption).foregroundStyle(StatusDot.color(store.status(server))).lineLimit(3).fixedSize(horizontal: false, vertical: true)
             } else if let s = snap {
                 meter("CPU", s.cpu.total, String(format: "%.0f%%", s.cpu.total))
                 meter("Memory", s.memory.percent, "\(Fmt.bytes(UInt64(s.memory.used))) of \(Fmt.bytes(UInt64(s.memory.total)))")
@@ -378,12 +629,13 @@ private struct ServerCard: View {
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 12))
+        .opacity(StatusDot.isOffline(store.status(server)) ? 0.55 : 1)
         .contentShape(RoundedRectangle(cornerRadius: 12))
     }
 
     @ViewBuilder private func status(_ snap: ServerSnapshot?) -> some View {
         if store.connecting.contains(server.id) { ProgressView().controlSize(.small) }
-        else { Circle().fill(store.errors[server.id] != nil ? Color.orange : snap != nil ? Color.green : Color.secondary.opacity(0.4)).frame(width: 8, height: 8) }
+        else { StatusDot(status: store.status(server)) }
     }
 
     private func meter(_ label: String, _ percent: Double, _ value: String) -> some View {
@@ -520,7 +772,7 @@ struct ServerEditor: View {
         c.edition = edition ? true : nil
         if edition {
             c.user = ""; c.container = ""
-            if let paired { c.fingerprint = paired.fingerprint; if name.isEmpty { c.name = paired.host } }
+            if let paired { c.fingerprint = paired.fingerprint; c.keyPin = paired.key; if name.isEmpty { c.name = paired.host } }
         } else {
             c.user = user.trimmingCharacters(in: .whitespaces); c.container = container.trimmingCharacters(in: .whitespaces); c.fingerprint = nil
         }
@@ -529,7 +781,7 @@ struct ServerEditor: View {
 
     /// Server Edition can be saved once paired (or when editing one already paired at the same address).
     private var canSave: Bool {
-        guard !host.isEmpty else { return false }
+        guard !host.isEmpty, ServerConfig.isSafe(host.trimmingCharacters(in: .whitespaces)) else { return false }
         if !edition { return true }
         if paired != nil { return true }
         if let s = server, s.isEdition, s.host == host.trimmingCharacters(in: .whitespaces), String(s.port) == port { return true }
@@ -614,7 +866,12 @@ struct ServerEditor: View {
             switch r {
             case .success(let pr):
                 var probe = ServerConfig(id: id, name: name, host: h); probe.port = p; probe.edition = true; probe.fingerprint = pr.fingerprint
-                ServerEdition.saveToken(pr.token, for: probe)
+                let saved = ServerEdition.saveToken(pr.token, for: probe)
+                guard saved == errSecSuccess, Keychain.get(account: ServerEdition.tokenAccount(probe)) == pr.token else {
+                    ok = false
+                    result = "Paired, but macOS didn’t let Apex keep the pairing in your keychain (\(Keychain.describe(saved))). Unlock the login keychain and pair again with a new code."
+                    return
+                }
                 paired = pr; ok = true
                 result = "Paired with \(pr.host). Check the certificate matches the one the install printed, then Save."
             case .failure(let e):
@@ -622,4 +879,19 @@ struct ServerEditor: View {
             }
         }
     }
+}
+
+/// Green online, red offline (off or not on its network), orange another
+/// problem, grey connecting.
+struct StatusDot: View {
+    let status: ServerReach.Status
+    var body: some View { Circle().fill(Self.color(status)).frame(width: 8, height: 8).help(Self.text(status) ?? "Online") }
+
+    static func color(_ s: ServerReach.Status) -> Color {
+        switch s { case .online: .green; case .connecting: .secondary.opacity(0.4); case .offline: .red; case .problem: .orange }
+    }
+    static func text(_ s: ServerReach.Status) -> String? {
+        switch s { case .online: nil; case .connecting: "Connecting…"; case .offline(let r): "Offline · " + r; case .problem(let m): m }
+    }
+    static func isOffline(_ s: ServerReach.Status) -> Bool { if case .offline = s { return true }; return false }
 }

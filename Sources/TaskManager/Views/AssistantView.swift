@@ -553,6 +553,10 @@ struct RichText: View {
         Text((try? AttributedString(markdown: s, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(s))
             .font(.system(size: size, weight: weight)).lineSpacing(3).textSelection(.enabled)
             .fixedSize(horizontal: false, vertical: true)
+            // Links in answers open only web pages: an answer can't open a file or an app on this Mac.
+            .environment(\.openURL, OpenURLAction { url in
+                ["http", "https"].contains(url.scheme?.lowercased() ?? "") ? .systemAction : .discarded
+            })
     }
 }
 

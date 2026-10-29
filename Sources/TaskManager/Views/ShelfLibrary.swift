@@ -9,7 +9,8 @@ struct ShelfLibrary: View {
     /// Opens a kept shelf (the floating shelf opens it by the handle; the menu bar shows it in place).
     var onOpen: (ShelfTarget) -> Void
     var onRestoreRecent: (ShelfSet) -> Void
-    private let store = ShelfStore.shared
+    /// The app's shelves (a separate store in render tests).
+    var store: ShelfStore = .shared
     @State private var renaming: UUID?
     @State private var newName = ""
     @State private var styling: UUID?
@@ -67,7 +68,7 @@ struct ShelfLibrary: View {
                 if !store.menuBarShelves.isEmpty {
                     section("In the menu bar") {
                         ForEach(store.menuBarShelves) { s in
-                            row(s, title: s.displayName, symbol: "menubar.rectangle") { onOpen(.side(s.id)) }
+                            row(s, title: s.displayName, symbol: "menubar.rectangle", onClose: { store.closeSide(s.id) }) { onOpen(.side(s.id)) }
                                 .dropDestination(for: URL.self) { urls, _ in store.add(urls, to: .side(s.id)); return true }
                                 .contextMenu {
                                     Button("Rename…") { newName = s.name ?? ""; renaming = s.id }
@@ -82,9 +83,14 @@ struct ShelfLibrary: View {
                     }
                 }
                 if !store.edgeShelves.isEmpty {
-                    section("To the side") {
+                    section("To the side", trailing: {
+                        if store.edgeShelves.count > 1 {
+                            Button("Close All") { store.closeAllEdgeShelves() }.buttonStyle(.link).font(.caption)
+                                .help("They go to Recently closed; the edge tab goes away when nothing's left to the side.")
+                        }
+                    }) {
                         ForEach(store.edgeShelves) { s in
-                            row(s, title: s.displayName, symbol: "sidebar.right") { onOpen(.side(s.id)) }
+                            row(s, title: s.displayName, symbol: "sidebar.right", onClose: { store.closeSide(s.id) }) { onOpen(.side(s.id)) }
                                 .dropDestination(for: URL.self) { urls, _ in store.add(urls, to: .side(s.id)); return true }
                                 .contextMenu {
                                     Button("Rename…") { newName = s.name ?? ""; renaming = s.id }
@@ -99,7 +105,7 @@ struct ShelfLibrary: View {
                     }
                 }
                 if !recent.isEmpty {
-                    section("Recent") {
+                    section("Recently closed") {
                         LazyVStack(spacing: 6) {
                             ForEach(recent) { s in
                                 row(s, title: s.displayName, symbol: "clock",
@@ -107,7 +113,7 @@ struct ShelfLibrary: View {
                                     .contextMenu { Button("Remove", role: .destructive) { store.removeRecent(s.id) } }
                             }
                         }
-                        Button("Clear Recent Shelves") { store.clearRecent() }
+                        Button("Clear Recently Closed") { store.clearRecent() }
                             .buttonStyle(.link).font(.caption)
                             .help("Takes them off this list. The files themselves stay where they are.")
                     }
@@ -133,7 +139,22 @@ struct ShelfLibrary: View {
 
     /// A row: up to four thumbnails of what's on it, its name and how many.
     private func row(_ s: ShelfSet, title: String, symbol: String, tint: Color? = nil, pinned: Bool = false,
-                     subtitle: String? = nil, open: @escaping () -> Void) -> some View {
+                     subtitle: String? = nil, onClose: (() -> Void)? = nil, open: @escaping () -> Void) -> some View {
+        HStack(spacing: 4) {
+            rowButton(s, title: title, symbol: symbol, tint: tint, pinned: pinned, subtitle: subtitle, open: open)
+            if let onClose {
+                Button(action: { withAnimation(.easeInOut(duration: 0.2)) { onClose() } }) {
+                    Image(systemName: "xmark.circle.fill").font(.system(size: 15)).foregroundStyle(.secondary)
+                        .frame(width: 22, height: 22).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Close this shelf. It goes to Recently closed.")
+            }
+        }
+    }
+
+    private func rowButton(_ s: ShelfSet, title: String, symbol: String, tint: Color?, pinned: Bool,
+                           subtitle: String?, open: @escaping () -> Void) -> some View {
         Button(action: open) {
             HStack(spacing: 10) {
                 ShelfPreview(items: s.items).frame(width: 52, height: 44)

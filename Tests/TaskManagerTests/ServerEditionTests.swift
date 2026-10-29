@@ -18,9 +18,10 @@ final class ServerEditionTests: XCTestCase {
         XCTAssertEqual(ServerEdition.url("203.0.113.9", 7443, "/api/hello")?.absoluteString, "https://203.0.113.9:7443/api/hello")
         XCTAssertEqual(ServerEdition.url("fe80::1", 7443, "/x")?.absoluteString, "https://[fe80::1]:7443/x")
         XCTAssertNil(ServerEdition.url(" ", 7443, "/x"))
+        XCTAssertEqual(ServerEdition.url("203.0.113.9", 7443, "/api/proxies?fresh=1")?.absoluteString, "https://203.0.113.9:7443/api/proxies?fresh=1")
         XCTAssertEqual(ServerEdition.fingerprint(Data("abc".utf8)).count, 95)
-        XCTAssertTrue(ServerEdition.problem(NSError(domain: NSURLErrorDomain, code: NSURLErrorCancelled), pinned: "AA").message.contains("certificate"))
-        XCTAssertTrue(ServerEdition.problem(NSError(domain: NSURLErrorDomain, code: NSURLErrorCannotConnectToHost), pinned: "AA").message.contains("port"))
+        XCTAssertTrue(ServerEdition.problem(.wrongCertificate, pinned: true).message.contains("certificate"))
+        XCTAssertTrue(ServerEdition.problem(.refused, pinned: true).message.contains("port"))
     }
 
     func testOldSavedServersStaySSH() throws {

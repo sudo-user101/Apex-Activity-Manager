@@ -4,6 +4,7 @@ import SwiftUI
 /// Drive Doctor (the stethoscope in drive page headers): findings, evidence and
 /// what to do, built from the same record as the Drive health item. The numbers
 /// themselves stay in the Drive health popover; this explains them.
+/// `embedded` drops the header and fixed size for Storage › Diagnose.
 struct DriveDoctorView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
@@ -13,23 +14,37 @@ struct DriveDoctorView: View {
     let capacity: UInt64
     let available: UInt64
     let volumes: [(name: String, path: String)]
+    var embedded = false
     @State private var checking = false
     @State private var firstAid: [DriveCheck.Result] = []
     @State private var open = Set<String>()
+    @State private var manual = false
 
     var body: some View {
         let report = DriveDoctor.diagnose(.init(record: record, usb: usb, capacity: capacity,
                                                 available: available, firstAid: firstAid))
         VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 10) {
-                Image(systemName: "stethoscope").font(.title2).foregroundStyle(.tint)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Drive Doctor").font(.title2).bold()
-                    Text(title).foregroundStyle(.secondary)
+            if !embedded {
+                HStack(spacing: 10) {
+                    Image(systemName: "stethoscope").font(.title2).foregroundStyle(.tint)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Drive Doctor").font(.title2).bold()
+                        Text(title).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
                 }
-                Spacer()
-                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
             }
+            Picker("", selection: $manual) {
+                Text("Automatic").tag(false)
+                Text("Manual").tag(true)
+            }
+            .pickerStyle(.segmented).labelsHidden().frame(width: 240)
+            .help("Automatic: Drive Doctor checks everything and explains. Manual: run individual checks yourself.")
+
+            if manual {
+                DriveManualView(record: record, volumes: volumes).frame(minHeight: 380, maxHeight: 520)
+            } else {
             Text("Drive Doctor analyses your drive’s health, identifies potential problems, estimates remaining lifespan when there’s enough data, and recommends steps to diagnose and fix issues.")
                 .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
 
@@ -60,9 +75,10 @@ struct DriveDoctorView: View {
                     .help("Runs macOS First Aid in read-only mode; nothing is changed. About 10 seconds per volume.")
             }
             if checking { ProgressView().progressViewStyle(.linear) }
+            }
         }
-        .padding(22)
-        .frame(width: 680)
+        .padding(embedded ? 0 : 22)
+        .frame(width: embedded ? nil : 680)
     }
 
     private func summary(_ report: DiagnosisReport) -> some View {

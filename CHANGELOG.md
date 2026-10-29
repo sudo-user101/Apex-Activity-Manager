@@ -1,5 +1,44 @@
 # Changelog
 
+## 1.4.0 (2026-10-29)
+
+- **All Servers:** every server added up (CPU weighted by cores, memory,
+  network, disk) with live graphs, and a list you can sort by any column.
+  Servers that don't answer show a red dot, are greyed out and say why:
+  this Mac is offline, isn't on the server's network, or the server is off.
+- **Resume and Stop:** start, unpause and stop a container (on this Mac or
+  on a server); shut a server down, and wake it with Wake-on-LAN where its
+  network card allows. Stop always asks first.
+- **Sites** (with Apex Server Edition 1.1): every nginx, Caddy, Traefik and
+  Nginx Proxy Manager site on a server, where it forwards, its HTTPS
+  certificate and its traffic over the last 10 minutes; add, edit, switch
+  off and remove sites, each change checked by the proxy and undone if
+  it's refused.
+- **Docker Management:** containers grouped by stack and the manager that
+  runs them (Dockge, Portainer, Compose), logs, stack up / update / down,
+  compose files checked before they're saved, images, volumes and
+  networks. Through Server Edition or over SSH.
+- **Pairing works on any address:** cloud and public addresses were
+  refused by macOS; Apex now checks the server's certificate itself, and
+  keeps working when Server Edition renews it.
+- **Utilities:** Window Manager (snap, shortcuts, layouts), App Switcher
+  (window previews), Clean Keyboard, Preview-Folder with a full archive
+  manager, Clipboard History and Drop Shelf, each with its own page.
+- **Settings › MacOSX Change:** hidden macOS settings and keyboard and mouse
+  behaviours in one place.
+- **Storage:** Diagnose, Compress in place (photos, videos, PDFs, folders,
+  cloud folders), Analyze shows what things look like.
+- **Cloud Disks:** an overview of every service, Add Service in three steps,
+  trash on each file, online-only files counted without downloading.
+- **Menu bar:** Sound (media controls and volume per app), a new icon.
+- **Energy:** battery time left from your own use; the charge limiter can
+  run the Mac from the adapter at the limit.
+- **Permissions:** Allow All asks one at a time and waits; switches keep
+  working after updates; the Accessibility prompt no longer repeats.
+- Fixes: saved passwords that another copy of Apex couldn't read, a
+  security review (archive paths, command options, SSH hosts, passwords
+  over http), and many smaller ones.
+
 ## 1.3.0 (2026-10-26)
 
 - **Servers and containers:** add Linux servers (SSH, or the new

@@ -380,3 +380,26 @@ final class MemoryCompositionTests: XCTestCase {
         XCTAssertEqual(PressureLevel.critical.color, MemoryColor.critical)
     }
 }
+
+final class BatteryLearnerTests: XCTestCase {
+    func testLearnsAndEstimates() throws {
+        var l = BatteryLearner()
+        XCTAssertNil(l.estimate(percent: 80, capacityMAh: 4000, volts: 12), "nothing learned yet")
+        for _ in 0..<40 { l.learn(watts: 6, apps: ["Safari": 2, "Music": 0.2]) }
+        let e = try XCTUnwrap(l.estimate(percent: 50, capacityMAh: 4000, volts: 12))
+        // 50% of 4000 mAh at 12 V = 24 Wh; at 6 W that's 4 hours.
+        XCTAssertEqual(e.minutes, 240, accuracy: 3)
+        XCTAssertEqual(e.drivers.first, "Safari")
+        XCTAssertTrue(e.drivers.contains("the display and the rest of the Mac"))
+        XCTAssertFalse(e.drivers.contains("Music"), "too small to mention")
+        // Heavier use now: the estimate follows quickly, the range shows the usual.
+        for _ in 0..<15 { l.learn(watts: 12, apps: ["Game": 8]) }
+        let e2 = try XCTUnwrap(l.estimate(percent: 50, capacityMAh: 4000, volts: 12))
+        XCTAssertLessThan(e2.minutes, 160)
+        XCTAssertEqual(e2.drivers.first, "Game")
+        XCTAssertLessThan(e2.low, e2.high)
+        XCTAssertTrue(BatteryLearner.describe(e2).hasPrefix("About "))
+        l.learn(watts: 900, apps: [:])                       // a nonsense reading is ignored
+        XCTAssertEqual(try XCTUnwrap(l.estimate(percent: 50, capacityMAh: 4000, volts: 12)).minutes, e2.minutes, accuracy: 0.01)
+    }
+}

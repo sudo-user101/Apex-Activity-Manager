@@ -5,7 +5,9 @@ import SwiftUI
 /// Removing an app: the app itself (always) and, only if ticked, each group
 /// of what else belongs to it: its data and settings, system files and
 /// helpers, saved sign-ins, and files made with it. Each item can be
-/// reviewed and unticked. Files go to the Trash.
+/// reviewed and unticked. The app is deleted for good, after you confirm
+/// (and quit first, helpers included, so nothing is left running or in the
+/// menu bar); its other files go to the Trash, so they can be put back.
 struct AppRemovalSheet: View {
     let path: String
     var onDone: (String?) -> Void            // message for the caller
@@ -19,6 +21,7 @@ struct AppRemovalSheet: View {
     @State private var keep = Set<String>()
     @State private var working = false
     @State private var running: [pid_t] = []
+    @State private var confirming = false
     /// Without Full Disk Access, Spotlight hides Documents and Desktop from Apex.
     @State private var canSeeFolders = true
 
@@ -64,13 +67,13 @@ struct AppRemovalSheet: View {
             HStack {
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Frees \(Fmt.diskBytes((appSize ?? 0) + chosenTotal))").font(.callout.weight(.semibold)).monospacedDigit()
-                    Text(chosen.contains(.signIns) ? "Files go to the Trash first. Removed sign-ins can’t be put back."
-                                                   : "Everything goes to the Trash first, so you can put it back.")
+                    Text("The app is deleted for good. " + (chosen.isEmpty ? "" : chosen.contains(.signIns)
+                         ? "Its files go to the Trash; removed sign-ins can’t be put back." : "Its files go to the Trash, so you can put them back."))
                         .font(.caption).foregroundStyle(.tertiary)
                 }
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button(chosen.isEmpty ? "Remove App" : "Remove Selected") { remove() }
+                Button(chosen.isEmpty ? "Delete App…" : "Delete Selected…") { confirming = true }
                     .keyboardShortcut(.defaultAction)
                     .disabled(working || info == nil || info?.isApple == true)
             }
@@ -78,6 +81,13 @@ struct AppRemovalSheet: View {
         .padding(20)
         .frame(width: 560)
         .task { await load() }
+        .confirmationDialog("Delete “\(info?.name ?? (path as NSString).lastPathComponent)” permanently?", isPresented: $confirming) {
+            Button("Delete App", role: .destructive) { remove() }
+        } message: {
+            Text((running.isEmpty ? "" : "It’s open: Apex quits it first, with its helpers, so nothing stays in the menu bar. ")
+                 + "The app can’t be put back from the Trash; you can download or install it again."
+                 + (chosen.isEmpty ? "" : " The other things you ticked go to the Trash."))
+        }
     }
 
     private func items(_ g: AppRemover.Group) -> [AppRemover.Leftover] { (found[g] ?? []).filter { !keep.contains($0.path) } }
@@ -202,21 +212,13 @@ struct AppRemovalSheet: View {
         found[.documents] = await docs
     }
 
-    /// The app and every process running from inside it (helpers included).
-    private func runningPIDs() -> [pid_t] {
-        AppModel.shared.snapshot.processes.filter { $0.path.hasPrefix(path + "/") }.map(\.pid)
-    }
+    /// The app and every process of it (by path, bundle ID, or helpers macOS
+    /// counts as the app's).
+    private func runningPIDs() -> [pid_t] { SafeTrash.runningApps([path]).map(\.id.pid) }
 
     private func quitApp() {
-        if let id = info?.bundleID { NSRunningApplication.runningApplications(withBundleIdentifier: id).forEach { $0.terminate() } }
         Task {
-            try? await Task.sleep(for: .seconds(2))
-            // Helpers still running from inside the app: each by identity (as
-            // sampled, with its path inside the app), never a bare PID.
-            let helpers = AppModel.shared.snapshot.processes
-                .filter { $0.path.hasPrefix(path + "/") && NSRunningApplication(processIdentifier: $0.pid) == nil }
-            for p in helpers { _ = ProcessSignal.send(SIGTERM, to: p.identity) }
-            try? await Task.sleep(for: .seconds(1))
+            _ = await SafeTrash.quitApps([path])
             running = runningPIDs()
         }
     }
@@ -226,11 +228,20 @@ struct AppRemovalSheet: View {
         let picked = chosen.flatMap { items($0) }
         let p = path, name = info?.name ?? "the app"
         Task {
-            let failed = await Task.detached { AppRemover.remove(appPath: p, leftovers: picked) }.value
+            // The app first: quit with all its helpers (no menu bar icon left behind),
+            // then deleted for good, with the administrator password if macOS asks for it.
+            let app = await SafeTrash.deleteApps([p])
+            guard app.failed.isEmpty else {
+                working = false
+                onDone(app.message)
+                dismiss()
+                return
+            }
+            let failed = await Task.detached { AppRemover.remove(appPath: nil, leftovers: picked) }.value
             working = false
             onDone(failed.isEmpty
-                   ? (picked.isEmpty ? "Moved \(name) to the Trash." : "Removed \(name) and \(picked.count) things that belonged to it.")
-                   : "Couldn’t remove: " + failed.joined(separator: ", "))
+                   ? (picked.isEmpty ? "Deleted \(name)." : "Deleted \(name); \(picked.count) things that belonged to it are in the Trash.")
+                   : "Removed \(name). Couldn’t remove: " + failed.joined(separator: ", "))
             dismiss()
         }
     }

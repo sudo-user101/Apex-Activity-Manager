@@ -156,13 +156,15 @@ This is how macOS itself counts memory.
 | Whole-Mac power (W) | `AppleSmartBattery` › `PowerTelemetryData.SystemLoad` (mW) |
 | Per-app power | Change in `ri_energy_nj` ÷ time |
 | Charge %, cycles, health, temperature, current | `AppleSmartBattery`: `AppleRawCurrentCapacity`, `AppleRawMaxCapacity`, `DesignCapacity`, `CycleCount`, `Temperature`, `InstantAmperage`; `IOPSCopyPowerSourcesInfo` for state |
-| Night charging | `FanControl.nightPlan`: hold at `holdAt` from `start`; top-up from `fullBy − ((100 − holdAt) × 2 + 15) min`; keep full until `openedAt` (screen wake, set by Apex) ≥ `fullBy` or 12:00. Helper keeps CHIE hold through sleep while holding and wakes the Mac via `IOPMSchedulePowerEvent(kIOPMAutoWake)` every 30 min / at top-up |
+| Night charging | `FanControl.nightPlan`: hold at `holdAt` from `start`; top-up from `fullBy − ((100 − holdAt) × 2 + 15) min`; keep full until `openedAt` (screen wake, set by Apex) ≥ `fullBy` or 12:00. With a pause method the hold stays through sleep (the adapter powers the Mac); with `CHIE` hold (only if `holdOnBattery` is on) the helper keeps it through sleep while holding and wakes the Mac via `IOPMSchedulePowerEvent(kIOPMAutoWake)` every 30 min / at top-up |
 | Charge schedules | Helper evaluates `FanControl.effectiveLimit` every 10 s from `fans.json` › `chargeSchedules` (weekday of the window's start, minutes after local midnight) |
 | Accessories (USB) | `system_profiler SPUSBDataType -json` (nested `_items` = devices behind a hub; `serial_num` matches drives for Eject): `bus_power_used` + `extra_current_used` (mA allocated) × 5 V = "up to" W; `bus_power` = port offers; `device_speed`, `vendor_id` name. Every 60 s on Energy, on popover open, on drive hotplug |
 | Accessory stop / resume | Drives: `diskutil unmountDisk` / `mountDisk` (stays attached); ejected drives: `IOUSBHostDevice(__ioService:).reset()` re-enumerates the device (mass storage = an interface with `bInterfaceClass` 8). Bluetooth: `IOBluetoothDevice.pairedDevices()`, `isConnected()`, `closeConnection()` / `openConnection()` |
 | Accessories (Bluetooth) | `BatteryPercent` + `Product` on `IOHIDDevice` / `AppleDeviceManagementHIDEventService` |
 | Charge history | One point a minute, 12 hours, saved in `charge.json` |
-| Charge limit | Helper writes SMC `CHIE` (0x08 hold / 0x00 allow) on this Mac; `CH0B`+`CH0C` or `CHTE` on firmware that has them. Status read back from `status.json` |
+| Charge limit | Helper pauses charging with SMC `CH0B`+`CH0C` (0x02) or `CHTE` (1) where the firmware has them: the adapter keeps powering the Mac. While paused, `CHIE` ≠ 0 (adapter cut off by something else) is written back to 0. `CHIE` 0x08 ("hold": adapter disconnected, the Mac runs on battery) only with `holdOnBattery` on; otherwise the limit isn't held (`limitNotHeld`). This M1 Air has only `CHIE`. Status read back from `status.json` |
+| Battery powering while plugged in | `AppleSmartBattery`: `ExternalConnected` and `InstantAmperage` (else `Amperage`; stored unsigned, read as signed): plugged in and ≤ −150 mA for 30 s (read every 10 s) |
+| While the Mac was off | At SIGTERM (shutdown, restart, update) the helper writes `/Library/Application Support/Apex/off.json` (level, time, limit, left paused) and leaves a paused charge paused (pause methods only, settings file still there, a limit applies). At the next start: charged past the limit (> 1 % above both) → explained; paused and within 1 % → "Stayed at N %". Removing the helper deletes the settings file first, so it hands charging back as it stops |
 
 ## Sensors
 
@@ -367,13 +369,43 @@ History and Startup stay this Mac's. Apex always opens on this Mac.
 
 | Value | Source |
 |---|---|
-| Connection | `/usr/bin/ssh` with `BatchMode=yes` (keys only, never a password), `ConnectTimeout=8`, `StrictHostKeyChecking=accept-new`; your `~/.ssh/config` applies. One shared connection (socket in `~/Library/Caches/Apex/ssh`, kept 60 s after last use) started on its own with `-f -N` and no pipes (`ServerClient.openShared`); each reading uses it with `ControlMaster=no`. (Started by a reading with `ControlMaster=auto`, the background connection held the reading's output open and each reading waited ~60 s) |
+| Connection | `/usr/bin/ssh` with `BatchMode=yes` (keys only, never a password), `ConnectTimeout=8`, `StrictHostKeyChecking=accept-new`; your `~/.ssh/config` applies. One shared connection (socket in `/tmp/apex-ssh-<uid>`, a 0700 folder used only if it's the user's own; short because macOS caps socket paths at 104 bytes; no safe folder → `ControlPath=none`, each reading connects itself; kept 60 s after last use) started on its own with `-f -N` and no pipes (`ServerClient.openShared`); each reading uses it with `ControlMaster=no`. (Started by a reading with `ControlMaster=auto`, the background connection held the reading's output open and each reading waited ~60 s) |
 | Readings | `Resources/apex-agent.py` (Python 3.6 or later; leaves out itself and its own `ps`; disks: real devices + a container's overlay root, not mounted files), sent on stdin to `python3 -` (or `docker exec -i <container> python3 -`) each refresh, every 3 s while the page shows: `/proc/stat` (CPU, two readings 1 s apart), `/proc/meminfo`, `/proc/loadavg`, `/proc/net/dev`, `/proc/diskstats` + `df`, `ps` (up to 500, busiest first), `nvidia-smi`, `docker ps -a` + `docker stats`, `systemctl list-units --type=service --all` (every service: state, description) and `--state=failed`, `who` (signed-in users), `ss` (established connections), web servers by process name. Refreshed every 3 s while a server is shown (whichever page), every 5 s for All Servers |
 | Containers on this Mac | The `docker` command line tool (Homebrew, Docker Desktop, OrbStack paths; its current context, e.g. Colima): `docker ps -a` + `docker stats --no-stream` (list, every 5 s on Docker Containers); for one container every 3 s: `docker stats` (CPU as a share of Docker's CPUs from `docker info` NCPU, memory used / limit, network and block I/O → rates from the previous reading), `docker inspect` (image, started), the container's own `ps` via `docker exec` (its own process ids, so End works; Apex's `ps` left out) or `docker top` when it has none (shown, not ended), `docker exec … df -kP /` (size; "not available" without df) |
 | Users (server) | Processes grouped by user (count, CPU, memory) + `who` sessions (terminal, from where); signed-in users first |
 | Actions | Confirmed first. Over the same SSH: `docker start / stop / restart`, `kill` / `kill -9` (inside the container with `docker exec` when watching one), `sudo -n systemctl start / stop / restart` (only where sudo needs no password). For a container on this Mac only `docker …` commands run (`LocalDocker.action` refuses anything else) |
 | Report | `ServerReports`: every saved server and running container read once a minute while Apex is open (`ServerStore.startReports`; ones read in the last 50 s are skipped), plus every reading while one is on screen. Each minute: average and peak CPU and memory, fullest disk (% used, mount), average network in / out, up-time, failed services, 5 busiest processes by CPU; a minute with no answer is marked down. 24 hours in `~/Library/Application Support/Apex Activity Manager/server-reports.json` (every 5 min and on quit). `ReportSummary`: averages and peaks over the range; events: CPU or memory ≥ 90 % for 5+ minutes in a row (a gap over 2 minutes ends a stretch), minutes unreachable, restarted (up-time over 2 minutes behind where it should be), fullest disk ≥ 90 %, failed services; received / sent = average rate × 60 per minute; busiest = time among the top 3 × average CPU |
-| Insights | `ServerInsights`: load > 1.5 × cores, available memory < 15 % / 5 %, swap > 50 %, disks ≥ 85 % / 95 %, days until full from growth (one point a minute, needs ≥ 10 min), failed services, containers exited with an error |
+| Insights | `ServerInsights`: load > 1.5 × cores, available memory < 15 % / 5 %, swap > 50 %, disks ≥ 85 % / 95 %, days until full from growth (one point a minute, needs ≥ 10 min), failed services, containers exited with an error; web: server errors ≥ 5 % (≥ 20 % critical) of ≥ 50 requests, scanners, an access log the SSH user can't read |
+| Web traffic | The agent reads the **last 1 MB** of the newest of `/var/log/nginx/access.log`, `/var/log/apache2/access.log`, `/var/log/httpd/access_log`, `/var/log/caddy/access.log` / `caddy.log` (nginx / Apache "combined" lines, Caddy JSON lines; unreadable lines skipped) and keeps requests from the **last 10 minutes**: count and per minute (over the time actually covered, at least a minute), 2xx / 3xx / 4xx / 5xx, bytes sent, bots and scripts (user agent contains bot, crawl, spider, curl, wget, python-requests…), the 5 most requested paths (query left out), 5 busiest client addresses, 5xx by status and path, and **scanners**: an address with ≥ 20 not-found replies or ≥ 3 requests for well-known attack paths (`/wp-login.php`, `/.env`, `/.git`, `/xmlrpc.php`, `/phpmyadmin`…). No log readable by the SSH user → `readable: false`. About 74 ms for a full 1 MB (measured on Linux). Apex Server Edition doesn't send it yet (the app shows nothing then) |
+
+## Preview-Folder
+
+| What | How |
+|---|---|
+| Which folder | Finder through Apple Events (`NSAppleScript`): the first selected item (a file → the folder it's in), else the front Finder window's folder, else the Desktop. Error -1743 = Automation not allowed |
+| What's inside | `contentsOfDirectory` of that folder only; names starting with "." are counted as hidden and left out; files' sizes from `totalFileAllocatedSize` at once |
+| Folder sizes | `FastSize.allocated` (allocated size, like Finder's "on disk"), 8 folders at a time, re-sorted biggest first as they finish; stopped when the panel closes |
+| What takes the space | By kind from the extension (`Cloud.kind`), subfolders as "Folders" |
+| Thumbnails | `QLThumbnailGenerator` (the file's icon until it's ready) |
+| Shortcut | Carbon `RegisterEventHotKey` (id 2; the shelf's is 1), no permission |
+
+## Settings › MacOSX Change
+
+| What | How |
+|---|---|
+| Each switch's state | Read live with `CFPreferencesCopyValue` (this user, any host) for every preference it sets: on only when all hold its value (booleans also match 0 / 1 and YES) |
+| Changing it | `CFPreferencesSetValue` + `CFPreferencesSynchronize` (what `defaults write` does, through cfprefsd); no password. On: what was there is remembered first (UserDefaults `macChangesBefore`, "domain|key" → the value, or empty = wasn't set; never overwritten by a later change). Off: that value is written back, or the key removed (macOS's default) |
+| Taking effect | `killall Dock`, `Finder` or `SystemUIServer` (macOS relaunches them) where those read the setting at launch; otherwise "Apps opened after this" or "after you log out", as the switch says |
+| Screenshot place | The folder is created if it doesn't exist (Pictures › Screenshots) |
+
+## Menu bar › Sound
+
+| Value | Source |
+|---|---|
+| Apps with sound | Core Audio process objects (`kAudioHardwarePropertyProcessObjectList`, macOS 14): PID, bundle id, `kAudioProcessPropertyIsRunningOutput` (playing now). Grouped under the app macOS holds responsible (`responsibility_get_pid_responsible_for_pid`, looked up with `dlsym`), else the bundle id cut before its `helper` part. Every 3 s while the tab shows or any app has its own volume |
+| Volume per app | macOS 14.2+: a process tap (`CATapDescription(stereoMixdownOfProcesses:)`, `mutedWhenTapped`, private) silences the app's own output; a private aggregate device (the tap in, the default output out, drift compensation) plays it with gain = slider² (0 when muted) in an IO block. Only for apps not at 100 %; rebuilt when the app's processes or the speakers change; gone when Apex quits (private devices end with the process), so the app's sound comes back. Asks for "System Audio Recording" (`NSAudioCaptureUsageDescription`) |
+| Speakers' volume | `kAudioHardwareServiceDeviceProperty_VirtualMainVolume` of the default output (`AudioHardwareService…PropertyData`) |
+| Play / pause, next, previous | The keyboard's media keys (`NX_KEYTYPE_PLAY` 16, `NEXT` 17, `PREVIOUS` 18) as `systemDefined` events (subtype 8) posted to the HID tap; macOS sends them to whatever is playing. Needs Accessibility (`AXIsProcessTrusted`). Song titles aren't shown: since macOS 15.4 apps can't read what's playing (MediaRemote is closed to them) |
 
 ## Shell
 
@@ -403,6 +435,17 @@ History and Startup stay this Mac's. Apex always opens on this Mac.
 | Speed graph | The traffic list's `nettop` snapshot every 5 s, summed per app (connections' rates), `TrafficHistory.points` |
 | Servers | Every non-local connection seen, by its key: bytes received / sent since Apex first saw it (deltas), first / last seen, still open or closed; grouped per server (protocol, address, port) |
 | When | Only while an Apex window is on screen (`AppModel.isWindowVisible`); older than 10 minutes dropped on every snapshot; memory only |
+
+## Cloud Disks: Overview
+
+| What | How |
+|---|---|
+| Not backed up yet | Files in the folder whose `ubiquitousItemIsUploaded` is false (nil, for plain folders, counts as neither), with `ubiquitousItemUploadingError` turned into the same plain reasons as the rings |
+| Not opened in 3 months | Stored on this Mac (> 1 MB), already uploaded, `contentAccessDate` (else `contentModificationDate`) older than 90 days; the biggest 500 are offered for Make Online-Only |
+| Space by kind | Allocated size on this Mac, by file extension (`Cloud.kind`) |
+| Online storage full | The service's quota (WebDAV, its page, or typed in): 90 % = Worth checking, 97 % = warning |
+| Desktop / Documents in a cloud | The folder's link resolved: inside iCloud Drive (Desktop & Documents Folders) or a ~/Library/CloudStorage folder |
+| Time Machine set up | `tmutil destinationinfo` lists a destination (once, when the Overview opens) |
 
 ## Cloud Disks: file rings and syncing
 

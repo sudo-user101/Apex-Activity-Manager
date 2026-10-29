@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Settings › General: how often Apex samples, how CPU is counted, the menu bar.
+/// Settings › General: how often Apex samples and how CPU is counted.
 struct GeneralSettingsTab: View {
     @Environment(AppModel.self) private var model
 
@@ -23,13 +23,6 @@ struct GeneralSettingsTab: View {
                     Text("Share of all cores, like Windows").tag(true)
                 }
                 .pickerStyle(.radioGroup)
-            }
-            Section("Menu Bar") {
-                Toggle("Show in menu bar", isOn: $model.showMenuBar.animation(.easeInOut(duration: 0.2)))
-                Picker("Menu bar shows", selection: $model.menuBarStyle) {
-                    Text("CPU").tag("cpu"); Text("Memory").tag("memory"); Text("CPU and memory").tag("both"); Text("Icon only").tag("icon")
-                }
-                .disabled(!model.showMenuBar)
             }
         }
         .settingsForm()

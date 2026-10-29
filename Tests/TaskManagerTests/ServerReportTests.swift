@@ -74,7 +74,9 @@ final class ServerReportTests: XCTestCase {
 
     @MainActor func testTabsForServers() {
         XCTAssertFalse(AppSection.tabs(.mac).contains(.report))
-        XCTAssertEqual(AppSection.tabs(.allServers), [.processes, .performance, .users, .services, .report])
+        XCTAssertEqual(AppSection.tabs(.allServers), [.processes, .performance, .users, .services, .report, .sites, .docker])
+        XCTAssertFalse(AppSection.tabs(.allContainers).contains(.sites), "containers have no reverse proxies")
+        XCTAssertFalse(AppSection.tabs(.mac).contains(.sites))
         let model = AppModel.shared
         let before = model.section
         defer { model.target = .mac; model.section = before }

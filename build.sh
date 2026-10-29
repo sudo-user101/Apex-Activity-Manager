@@ -44,13 +44,19 @@ KEYCHAIN_ARGS=()
 [ -n "${APEX_KEYCHAIN:-}" ] && KEYCHAIN_ARGS=(--keychain "$APEX_KEYCHAIN")
 
 # sign PATH ENTITLEMENTS [IDENTIFIER]: Developer ID with the hardened runtime
-# and a secure timestamp, or ad-hoc when no identity is set.
+# and a secure timestamp, or ad-hoc when no identity is set. Ad-hoc builds get
+# the hardened runtime too: without it another program could start Apex with
+# its own code loaded (DYLD_INSERT_LIBRARIES) and borrow Apex's permissions.
 sign() {
   if [ -n "$IDENTITY" ]; then
     codesign --force --options runtime --timestamp --entitlements "$2" ${3:+--identifier "$3"} \
       ${KEYCHAIN_ARGS[@]+"${KEYCHAIN_ARGS[@]}"} --sign "$IDENTITY" "$1"
   else
-    codesign --force --sign - --timestamp=none "$1" >/dev/null
+    # APEX_LOCAL_IDENTITY (set by `dev.sh build` from this Mac's Apple Development
+    # certificate): the same identity on every build, so permissions granted in
+    # System Settings keep working after a rebuild. Ad-hoc signing ties them to
+    # one build's exact hash instead. Never used for builds others download.
+    codesign --force --options runtime --entitlements "$2" ${3:+--identifier "$3"} --sign "${APEX_LOCAL_IDENTITY:--}" --timestamp=none "$1" >/dev/null
   fi
 }
 
@@ -87,6 +93,7 @@ strip -x "$APP/Contents/MacOS/TaskManager" 2>/dev/null || true
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 cp Resources/apex-agent.py "$APP/Contents/Resources/apex-agent.py"   # sent to servers over SSH (Servers page)
+cp Resources/apex-docker.py "$APP/Contents/Resources/apex-docker.py" # Docker Management over SSH
 # Sign the nested helper first (strip removes the linker's signature on universal builds).
 # Its identifier matches its LaunchDaemon label.
 sign "$APP/Contents/MacOS/apex-fanhelper" Resources/ApexFanHelper.entitlements com.apex.fanhelper

@@ -115,8 +115,10 @@ final class ShelfStore {
         if shelves.isEmpty { shelves = [ShelfSet()] }
         if let d = try? Data(contentsOf: sideFile), let s = try? JSONDecoder().decode([ShelfSet].self, from: d) { side = s }
         if let d = try? Data(contentsOf: categoriesFile), let s = try? JSONDecoder().decode([ShelfSet].self, from: d) { categories = s }
+        // Kept shelves emptied by older versions (they left an empty chip behind).
+        var changed = side.contains { $0.items.isEmpty }
+        side.removeAll { $0.items.isEmpty }
         // Items saved before aliases were followed: point them at the real files.
-        var changed = false
         for i in shelves.indices {
             for j in shelves[i].items.indices {
                 let real = Self.resolved(shelves[i].items[j].url).path
@@ -195,7 +197,12 @@ final class ShelfStore {
         let to = try Self.renamed(item.url, base: base)
         guard to != item.url else { return to }
         try FileManager.default.moveItem(at: item.url, to: to)
-        let old = item.path, new = to.path
+        repoint(from: item.path, to: to.path)
+        return to
+    }
+
+    /// Every shelf entry that pointed at `old` (or was made from it) now points at `new`.
+    private func repoint(from old: String, to new: String) {
         func fix(_ set: inout ShelfSet) {
             for j in set.items.indices {
                 if set.items[j].path == old { set.items[j].path = new }
@@ -206,7 +213,34 @@ final class ShelfStore {
         for i in side.indices { fix(&side[i]) }
         for i in categories.indices { fix(&categories[i]) }
         save()
+    }
+
+    /// Moves the file into `folder` (the shelf follows it) or copies it there
+    /// (the shelf keeps the original). A name already taken there gets " 2",
+    /// " 3"… so nothing is overwritten. Returns where it went.
+    @discardableResult
+    func send(_ item: ShelfItem, to folder: URL, move: Bool) throws -> URL {
+        let to = Self.freeName(for: item.url, in: folder) { FileManager.default.fileExists(atPath: $0.path) }
+        if move {
+            try FileManager.default.moveItem(at: item.url, to: to)
+            repoint(from: item.path, to: to.path)
+        } else {
+            try FileManager.default.copyItem(at: item.url, to: to)
+        }
+        ShelfDestinations.remember(folder)
         return to
+    }
+
+    /// `name.ext` in `folder`, or `name 2.ext`, `name 3.ext`… if taken. Pure (`taken` is asked): tested.
+    nonisolated static func freeName(for url: URL, in folder: URL, taken: (URL) -> Bool) -> URL {
+        let base = url.deletingPathExtension().lastPathComponent, ext = url.pathExtension
+        var n = 1
+        while true {
+            let name = (n == 1 ? base : "\(base) \(n)") + (ext.isEmpty ? "" : "." + ext)
+            let to = folder.appendingPathComponent(name)
+            if !taken(to) || n > 9999 { return to }
+            n += 1
+        }
     }
 
     struct RenameError: LocalizedError {
@@ -243,9 +277,9 @@ final class ShelfStore {
 
     // MARK: Minimize: to the side, or into a category
 
-    /// Shelves kept at the screen edge / in the menu bar.
-    var edgeShelves: [ShelfSet] { side.filter { $0.inMenuBar != true } }
-    var menuBarShelves: [ShelfSet] { side.filter { $0.inMenuBar == true } }
+    /// Shelves kept at the screen edge / in the menu bar (never an empty one).
+    var edgeShelves: [ShelfSet] { side.filter { $0.inMenuBar != true && !$0.items.isEmpty } }
+    var menuBarShelves: [ShelfSet] { side.filter { $0.inMenuBar == true && !$0.items.isEmpty } }
 
     /// Puts the shelf on show to the side (or, `menuBar`, into the menu bar's
     /// Shelf tab); the next drag starts a new one.
@@ -260,17 +294,12 @@ final class ShelfStore {
         save()
     }
 
-    /// After its files were dropped somewhere: the shelf on show goes into the
-    /// menu bar's Shelf tab (or to the side). The current shelf is kept there
-    /// and the next drag starts a new one; a side shelf moves into the menu
-    /// bar; a category stays where it is.
-    func tuckAway(menuBar: Bool) {
-        switch open {
-        case .current: minimizeToSide(menuBar: menuBar); return
-        case .side(let id):
-            if let i = side.firstIndex(where: { $0.id == id }) { side[i].inMenuBar = menuBar ? true : nil }
-        case .category: break
-        }
+    /// After its files were dropped somewhere: the shelf's job is done. The
+    /// current shelf closes, like ×, into Recently closed (nothing is put in
+    /// the menu bar or a category by itself: only the user puts things there);
+    /// a side shelf or category the user kept stays where it is.
+    func finishAfterDrop() {
+        if open == .current { newShelf() }
         open = .current
         save()
     }
@@ -364,7 +393,22 @@ final class ShelfStore {
         side.removeAll { $0.id == id }
         if open == .side(id) { open = .current }
         save()
+        FloatingShelf.shared.updateSideHandle()      // nothing left to the side: the edge tab goes
     }
+
+    /// Its × : the shelf leaves the side (or the menu bar) and goes to
+    /// Recently closed, like any closed shelf, so it can be opened again.
+    func closeSide(_ id: UUID) {
+        guard let s = side.first(where: { $0.id == id }) else { return }
+        side.removeAll { $0.id == id }
+        if !s.items.isEmpty { shelves.insert(s, at: min(1, shelves.count)) }
+        if open == .side(id) { open = .current }
+        save()
+        FloatingShelf.shared.updateSideHandle()
+    }
+
+    /// Close All in "To the side".
+    func closeAllEdgeShelves() { for s in edgeShelves { closeSide(s.id) } }
 
     /// Adds files straight into a side shelf or category (dropped on its row).
     @discardableResult
@@ -413,7 +457,9 @@ final class ShelfStore {
         case .current:
             if shelves.isEmpty { shelves = [s] } else { shelves[0] = s }
         case .side(let id):
-            if let i = side.firstIndex(where: { $0.id == id }) { side[i] = s }
+            // A kept shelf with nothing left on it is gone (no empty chip or edge entry).
+            if s.items.isEmpty { side.removeAll { $0.id == id }; open = .current }
+            else if let i = side.firstIndex(where: { $0.id == id }) { side[i] = s }
         case .category(let id):
             if let i = categories.firstIndex(where: { $0.id == id }) { categories[i] = s }
         }
@@ -440,5 +486,23 @@ final class ShelfStore {
         if let d = try? JSONEncoder().encode(shelves) { try? d.write(to: file, options: .atomic) }
         if let d = try? JSONEncoder().encode(side) { try? d.write(to: sideFile, options: .atomic) }
         if let d = try? JSONEncoder().encode(categories) { try? d.write(to: categoriesFile, options: .atomic) }
+    }
+}
+
+/// The last folders files were moved or copied to from a shelf (UserDefaults
+/// `shelfDestinations`, newest first, at most 5), offered at the top of the
+/// Move To / Copy To menus.
+enum ShelfDestinations {
+    static let key = "shelfDestinations"
+    static var folders: [URL] {
+        (UserDefaults.standard.stringArray(forKey: key) ?? []).map { URL(fileURLWithPath: $0) }
+            .filter { var d: ObjCBool = false; return FileManager.default.fileExists(atPath: $0.path, isDirectory: &d) && d.boolValue }
+    }
+    static func remember(_ folder: URL, in d: UserDefaults = .standard) {
+        d.set(updated(d.stringArray(forKey: key) ?? [], adding: folder.path), forKey: key)
+    }
+    /// Newest first, no repeats, at most 5. Pure: tested.
+    static func updated(_ list: [String], adding path: String) -> [String] {
+        Array(([path] + list.filter { $0 != path }).prefix(5))
     }
 }

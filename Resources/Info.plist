@@ -19,7 +19,7 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.3.0</string>
+	<string>1.4.0</string>
 	<key>CFBundleVersion</key>
 	<string>5</string>
 	<key>LSApplicationCategoryType</key>
@@ -27,7 +27,9 @@
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 	<key>NSAppleEventsUsageDescription</key>
-	<string>Apex Activity Manager uses the standard administrator prompt to end or reprioritise processes owned by other users.</string>
+	<string>Apex Activity Manager uses the standard administrator prompt to end or reprioritise processes owned by other users, and asks Finder which folder is selected for Preview-Folder.</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>Apex sets a volume for each app: the app's sound passes through Apex on its way to your speakers, made louder or quieter. Nothing is recorded or kept.</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>Apex lists your Bluetooth accessories and can disconnect and reconnect them when you ask.</string>
 	<key>NSBonjourServices</key>
@@ -40,6 +42,60 @@
 	<string>© 2026 CyberNet Labs. All rights reserved.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Apex asks your router for its name and model (UPnP) to show on the Network page, and finds AirPlay displays for the Display page. Nothing leaves your network.</string>
+	<key>NSServices</key>
+	<array>
+		<dict>
+			<key>NSMenuItem</key>
+			<dict>
+				<key>default</key>
+				<string>Look Inside with Apex</string>
+			</dict>
+			<key>NSMessage</key>
+			<string>lookInside</string>
+			<key>NSPortName</key>
+			<string>Apex Activity Manager</string>
+			<key>NSRequiredContext</key>
+			<dict/>
+			<key>NSSendFileTypes</key>
+			<array>
+				<string>public.item</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSMenuItem</key>
+			<dict>
+				<key>default</key>
+				<string>Extract with Apex</string>
+			</dict>
+			<key>NSMessage</key>
+			<string>extractArchives</string>
+			<key>NSPortName</key>
+			<string>Apex Activity Manager</string>
+			<key>NSRequiredContext</key>
+			<dict/>
+			<key>NSSendFileTypes</key>
+			<array>
+				<string>public.item</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSMenuItem</key>
+			<dict>
+				<key>default</key>
+				<string>Compress with Apex</string>
+			</dict>
+			<key>NSMessage</key>
+			<string>compressItems</string>
+			<key>NSPortName</key>
+			<string>Apex Activity Manager</string>
+			<key>NSRequiredContext</key>
+			<dict/>
+			<key>NSSendFileTypes</key>
+			<array>
+				<string>public.item</string>
+			</array>
+		</dict>
+	</array>
 	<key>NSSupportsAutomaticTermination</key>
 	<false/>
 </dict>

@@ -951,9 +951,21 @@ final class ServerTests: XCTestCase {
         XCTAssertTrue(a.contains("BatchMode=yes"), "never prompts for a password")
         XCTAssertTrue(a.contains("ControlMaster=no"), "a command never starts the shared connection (it would hold the output open)")
         XCTAssertFalse(a.contains("ControlMaster=auto"))
-        XCTAssertEqual(Array(a.suffix(3)), ["-p", "2222", "ubuntu@srv"])
+        XCTAssertEqual(Array(a.suffix(4)), ["-p", "2222", "--", "ubuntu@srv"], "options end before the host")
         XCTAssertEqual(ServerClient.agentCommand(ServerConfig(name: "c", host: "h", container: "web; rm -rf /")),
                        "docker exec -i 'web; rm -rf /' python3 - ", "container names are quoted")
+    }
+
+    func testSharedConnectionSocketIsShortAndPrivate() {
+        XCTAssertTrue(ServerClient.controlPathFits("/tmp/apex-ssh-501"))
+        XCTAssertFalse(ServerClient.controlPathFits("/Users/christopher.anderson/Library/Caches/Apex/ssh"),
+                       "the old place: too long for a Unix socket with a long user name")
+        XCTAssertTrue(ServerClient.isSafeSocketDir(owner: 501, mode: S_IFDIR | 0o700, uid: 501))
+        XCTAssertFalse(ServerClient.isSafeSocketDir(owner: 502, mode: S_IFDIR | 0o700, uid: 501), "made by someone else")
+        XCTAssertFalse(ServerClient.isSafeSocketDir(owner: 501, mode: S_IFDIR | 0o755, uid: 501), "others can look in")
+        XCTAssertFalse(ServerClient.isSafeSocketDir(owner: 501, mode: S_IFLNK | 0o700, uid: 501), "a link planted in /tmp")
+        let none = ServerClient.sshArguments(ServerConfig(name: "x", host: "srv"), socketDir: nil)
+        XCTAssertTrue(none.contains("ControlPath=none"), "no safe folder: connect each time instead")
     }
 
     func testErrorsInPlainWords() {
@@ -1037,6 +1049,34 @@ final class ServersRenderTests: XCTestCase {
         try await render(RemoteUsersView(server: config), dir + "/\(name)-users.png")
         AppModel.shared.target = .allContainers
         try await render(ContainersOverview(), dir + "/containers.png")
+        AppModel.shared.target = .mac
+    }
+
+    /// APEX_RENDER_SERVERS=dir APEX_RENDER_TARGET=<container on this Mac>: All
+    /// Servers with that container and an address that doesn't answer, live,
+    /// as the list and as cards. The two are removed afterwards.
+    @MainActor func testRenderFleet() async throws {
+        guard let dir = ProcessInfo.processInfo.environment["APEX_RENDER_SERVERS"],
+              let name = ProcessInfo.processInfo.environment["APEX_RENDER_TARGET"] else { throw XCTSkip("set APEX_RENDER_SERVERS and APEX_RENDER_TARGET") }
+        let store = ServerStore.shared
+        ServerClient.agentScriptOverride = try String(contentsOf: URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().appendingPathComponent("../../Resources/apex-agent.py").standardized, encoding: .utf8)
+        await store.refreshLocal()
+        let live = try XCTUnwrap(store.localConfigs.first { $0.name == name })
+        let down = ServerConfig(name: "backup-01", host: "203.0.113.9", user: "ubuntu", port: 22, container: "")
+        let away = ServerConfig(name: "office-nas", host: "192.168.77.5", user: "admin", port: 22, container: "")
+        store.add(live); store.add(down); store.add(away)
+        defer { store.remove(live); store.remove(down); store.remove(away) }
+        for _ in 0..<4 { await store.refreshAll(); try await Task.sleep(for: .seconds(1)) }
+        XCTAssertEqual(store.fleet.online, 1)
+        XCTAssertEqual(store.fleet.offline, 2)
+        XCTAssertGreaterThan(store.fleet.cores, 0)
+        AppModel.shared.target = .allServers
+        UserDefaults.standard.set(false, forKey: "serversAsCards")
+        try await render(ServersOverview(), dir + "/fleet-list.png")
+        UserDefaults.standard.set(true, forKey: "serversAsCards")
+        try await render(ServersOverview(), dir + "/fleet-cards.png")
+        UserDefaults.standard.removeObject(forKey: "serversAsCards")
         AppModel.shared.target = .mac
     }
 }
@@ -1129,7 +1169,7 @@ final class MachineTests: XCTestCase {
 
     func testServersTabIsGone() {
         XCTAssertNil(AppSection(rawValue: "servers"), "a saved Servers tab opens Processes")
-        XCTAssertEqual(AppSection.allCases.filter(\.followsTarget), [.processes, .performance, .users, .services, .report])
+        XCTAssertEqual(AppSection.allCases.filter(\.followsTarget), [.processes, .performance, .users, .services, .report, .sites, .docker])
     }
 }
 
@@ -1340,7 +1380,7 @@ final class AppRelatedTests: XCTestCase {
                                              .init(path: "receipt:com.google.Chrome", kind: "", group: .system, needsAdmin: true)],
                                             trash: "/Users/x/.Trash", stamp: "1")
         XCTAssertEqual(script, "/bin/launchctl bootout system '/Library/LaunchDaemons/a b.plist' >/dev/null 2>&1; "
-                       + "/bin/mv -f '/Library/LaunchDaemons/a b.plist' '/Users/x/.Trash/a b.plist 1'; "
+                       + "/bin/mv -f '/Library/LaunchDaemons/a b.plist' '/Users/x/.Trash/a b.plist 1' && /usr/sbin/chown -R '\(NSUserName())' '/Users/x/.Trash/a b.plist 1'; "
                        + "/usr/sbin/pkgutil --forget 'com.google.Chrome' >/dev/null 2>&1")
     }
 }
@@ -1384,7 +1424,7 @@ final class ShelfDragTests: XCTestCase {
         XCTAssertEqual(FloatingShelf.tuckScale(from: .zero, to: NSSize(width: 30, height: 24)), 0.1)
     }
 
-    @MainActor func testTuckAwayKeepsTheShelfInTheMenuBar() throws {
+    @MainActor func testAfterADropTheShelfClosesAndIsntKept() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("apex-tuck-\(UUID())")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -1392,24 +1432,22 @@ final class ShelfDragTests: XCTestCase {
         try Data("a".utf8).write(to: a); try Data("b".utf8).write(to: b)
         let store = ShelfStore(folder: dir.appendingPathComponent("store"))
         store.add([a, b])
-        store.tuckAway(menuBar: true)
-        XCTAssertEqual(store.menuBarShelves.count, 1, "kept in the menu bar's Shelf tab")
-        XCTAssertEqual(store.menuBarShelves.first?.items.count, 2)
+        let closed = store.current.id
+        store.finishAfterDrop()
+        XCTAssertTrue(store.menuBarShelves.isEmpty && store.edgeShelves.isEmpty && store.categories.isEmpty,
+                      "nothing is kept in the menu bar, the side or a category by itself")
         XCTAssertTrue(store.current.items.isEmpty, "the next drag starts a new shelf")
+        XCTAssertTrue(store.shelves.dropFirst().contains { $0.id == closed }, "it's in Recently closed, like ×")
         XCTAssertEqual(store.open, .current)
 
-        // A side shelf on show moves into the menu bar.
+        // A shelf the user kept to the side stays where they put it.
         store.add([a])
         store.minimizeToSide()
         let side = try XCTUnwrap(store.edgeShelves.first)
         store.open = .side(side.id)
-        store.tuckAway(menuBar: true)
-        XCTAssertTrue(store.edgeShelves.isEmpty)
-        XCTAssertEqual(store.menuBarShelves.count, 2)
-
-        // Nothing on the shelf: nothing is kept.
-        store.tuckAway(menuBar: true)
-        XCTAssertEqual(store.menuBarShelves.count, 2)
+        store.finishAfterDrop()
+        XCTAssertEqual(store.edgeShelves.map(\.id), [side.id])
+        XCTAssertTrue(store.menuBarShelves.isEmpty)
     }
 }
 
@@ -1426,5 +1464,270 @@ final class ShelfPinLimitTests: XCTestCase {
         XCTAssertTrue(store.setPinned(ids[0], true), "pinning one that's pinned is fine")
         store.setPinned(ids[0], false)
         XCTAssertTrue(store.setPinned(ids[5], true), "room again after one is taken out")
+    }
+}
+
+final class ShelfEmptyKeptTests: XCTestCase {
+    @MainActor func testEmptiedKeptShelvesDisappear() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("apex-empty-\(UUID())")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let a = dir.appendingPathComponent("a.txt"), b = dir.appendingPathComponent("b.txt")
+        try Data("a".utf8).write(to: a); try Data("b".utf8).write(to: b)
+        let store = ShelfStore(folder: dir.appendingPathComponent("store"))
+        store.add([a]); store.minimizeToSide(menuBar: true)
+        store.add([b]); store.minimizeToSide(menuBar: true)
+        XCTAssertEqual(store.menuBarShelves.count, 2)
+
+        // Cleared from the menu bar: the shelf and its chip go.
+        store.open = .side(store.menuBarShelves[0].id)
+        store.clearCurrent()
+        XCTAssertEqual(store.menuBarShelves.count, 1)
+        XCTAssertEqual(store.open, .current)
+
+        // Its last file removed: the same.
+        let last = store.menuBarShelves[0]
+        store.open = .side(last.id)
+        store.remove(last.items[0])
+        XCTAssertTrue(store.menuBarShelves.isEmpty)
+
+        // Empty kept shelves saved by an older version are dropped when loading.
+        let raw = try JSONEncoder().encode([ShelfSet(), ShelfSet()])
+        try raw.write(to: dir.appendingPathComponent("store/side.json"))
+        let reloaded = ShelfStore(folder: dir.appendingPathComponent("store"))
+        XCTAssertTrue(reloaded.menuBarShelves.isEmpty && reloaded.edgeShelves.isEmpty)
+    }
+}
+
+final class ShelfCloseSideTests: XCTestCase {
+    /// A shelf to the side closed with its ×: gone from the side, kept in Recently closed with its files.
+    @MainActor func testClosingASideShelfMovesItToRecentlyClosed() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("apex-close-\(UUID())")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let a = dir.appendingPathComponent("a.txt"), b = dir.appendingPathComponent("b.txt")
+        try Data("a".utf8).write(to: a); try Data("b".utf8).write(to: b)
+        let store = ShelfStore(folder: dir.appendingPathComponent("store"))
+        store.add([a]); store.minimizeToSide(menuBar: false)
+        store.add([b]); store.minimizeToSide(menuBar: false)
+        XCTAssertEqual(store.edgeShelves.count, 2)
+        let first = store.edgeShelves[0]
+        store.closeSide(first.id)
+        XCTAssertEqual(store.edgeShelves.count, 1)
+        XCTAssertTrue(store.shelves.dropFirst().contains { $0.id == first.id && $0.items.map(\.name) == first.items.map(\.name) },
+                      "in Recently closed, with its files")
+        store.closeAllEdgeShelves()
+        XCTAssertTrue(store.edgeShelves.isEmpty)
+        XCTAssertEqual(store.shelves.dropFirst().filter { !$0.items.isEmpty }.count, 2)
+    }
+}
+
+/// APEX_RENDER_SHELFLIB=file.png: the shelf list with two shelves to the side (a test store), dark.
+final class ShelfLibraryRenderTests: XCTestCase {
+    @MainActor func testRender() throws {
+        guard let out = ProcessInfo.processInfo.environment["APEX_RENDER_SHELFLIB"] else { throw XCTSkip("set APEX_RENDER_SHELFLIB") }
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("apex-lib-\(UUID())")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = ShelfStore(folder: dir.appendingPathComponent("store"))
+        for n in ["Invoice.pdf", "Notes.txt"] {
+            let f = dir.appendingPathComponent(n); try Data(n.utf8).write(to: f)
+            store.add([f]); store.minimizeToSide(menuBar: false)
+        }
+        let host = NSHostingView(rootView: ShelfLibrary(onOpen: { _ in }, onRestoreRecent: { _ in }, store: store)
+            .background(Color(white: 0.15)).environment(\.colorScheme, .dark))
+        host.frame = NSRect(origin: .zero, size: host.fittingSize)
+        host.layoutSubtreeIfNeeded()
+        let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds)!
+        host.cacheDisplay(in: host.bounds, to: rep)
+        try rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: out))
+    }
+}
+
+final class CompressOriginalsTests: XCTestCase {
+    private func make(_ dir: URL, _ name: String, _ bytes: Int) throws -> URL {
+        let u = dir.appendingPathComponent(name); try Data(count: bytes).write(to: u); return u
+    }
+
+    /// "Delete them permanently": the copies take their place, the originals are gone and not in the Trash.
+    func testOriginalsDeletedForGood() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("apex-orig-\(UUID())")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let png = try make(dir, "Shot.png", 1000), pngCopy = try make(dir, ".apex-1.heic", 300)
+        let jpg = try make(dir, "IMG.jpg", 2000), jpgCopy = try make(dir, ".apex-2.jpg", 900)
+        let trash = NSHomeDirectory() + "/.Trash"
+        let before = Set((try? FileManager.default.contentsOfDirectory(atPath: trash)) ?? [])
+        let failed = InPlaceCompressor.swapIn([
+            .init(original: png, copy: pngCopy, finalURL: dir.appendingPathComponent("Shot.heic"), before: 1000, after: 300),
+            .init(original: jpg, copy: jpgCopy, finalURL: jpg, before: 2000, after: 900),
+        ], permanently: true)
+        XCTAssertTrue(failed.isEmpty)
+        let names = Set(try FileManager.default.contentsOfDirectory(atPath: dir.path))
+        XCTAssertEqual(names, ["Shot.heic", "IMG.jpg"], "no originals, copies or hidden folders left")
+        XCTAssertEqual(try Data(contentsOf: jpg).count, 900)
+        let after = Set((try? FileManager.default.contentsOfDirectory(atPath: trash)) ?? [])
+        XCTAssertTrue(after.subtracting(before).filter { $0.hasPrefix("Shot") || $0.hasPrefix("IMG") }.isEmpty, "nothing went to the Trash")
+    }
+
+    /// "Put them in the Trash" (the default) still keeps them recoverable.
+    func testOriginalsToTheTrash() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("apex-orig-\(UUID())")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let name = "Apex test \(UUID().uuidString.prefix(8)).jpg"
+        let jpg = try make(dir, name, 2000), copy = try make(dir, ".apex-3.jpg", 900)
+        XCTAssertTrue(InPlaceCompressor.swapIn([.init(original: jpg, copy: copy, finalURL: jpg, before: 2000, after: 900)]).isEmpty)
+        XCTAssertEqual(try Data(contentsOf: jpg).count, 900)
+        let trash = NSHomeDirectory() + "/.Trash"
+        let inTrash = ((try? FileManager.default.contentsOfDirectory(atPath: trash)) ?? []).filter { $0.hasPrefix(name.replacingOccurrences(of: ".jpg", with: "")) }
+        for n in inTrash { try? FileManager.default.removeItem(atPath: trash + "/" + n) }     // tidy
+        XCTAssertEqual(Set(try FileManager.default.contentsOfDirectory(atPath: dir.path)), [name], "no hidden folder left")
+    }
+}
+
+/// APEX_RENDER_COMPRESS=folder:dir — the sheet for a (cloud) folder, both choices. Read-only: nothing is compressed.
+final class CompressSheetRenderTests: XCTestCase {
+    @MainActor func testRender() async throws {
+        guard let arg = ProcessInfo.processInfo.environment["APEX_RENDER_COMPRESS"], let i = arg.lastIndex(of: ":") else { throw XCTSkip("set APEX_RENDER_COMPRESS") }
+        let folder = String(arg[..<i]), dir = String(arg[arg.index(after: i)...])
+        for scope in [CompressInPlaceSheet.Scope.onThisMac, .wholeOnline] {
+            let host = NSHostingView(rootView: CompressInPlaceSheet(path: folder, onDone: { _ in }, startScope: scope)
+                .background(Color(nsColor: .windowBackgroundColor)).environment(\.colorScheme, .dark))
+            let w = NSWindow(contentRect: NSRect(x: -4000, y: -4000, width: 520, height: 500), styleMask: .borderless, backing: .buffered, defer: false)
+            w.appearance = NSAppearance(named: .darkAqua)
+            w.contentView = host
+            w.orderFrontRegardless()
+            for _ in 0..<40 { try await Task.sleep(for: .milliseconds(250)) }
+            w.setContentSize(host.fittingSize)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+            let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds)!
+            host.cacheDisplay(in: host.bounds, to: rep)
+            try rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: "\(dir)/compress-\(scope == .onThisMac ? "local" : "whole").png"))
+            w.orderOut(nil)
+        }
+    }
+}
+
+import AVFoundation
+import PDFKit
+
+final class CompressKindsTests: XCTestCase {
+    func testKinds() {
+        XCTAssertEqual(InPlaceCompressor.kind(of: URL(fileURLWithPath: "/a/Shot.PNG")), .photo)
+        XCTAssertEqual(InPlaceCompressor.kind(of: URL(fileURLWithPath: "/a/clip.mp4")), .video)
+        XCTAssertEqual(InPlaceCompressor.kind(of: URL(fileURLWithPath: "/a/doc.pdf")), .pdf)
+        XCTAssertNil(InPlaceCompressor.kind(of: URL(fileURLWithPath: "/a/notes.docx")))
+    }
+
+    /// A PDF that's only text can't shrink: the compressor hands back the original, which must survive.
+    func testATextPDFThatCantShrinkIsLeftAlone() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("apex-pdf-\(UUID())")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let pdf = dir.appendingPathComponent("Notes.pdf")
+        var box = CGRect(x: 0, y: 0, width: 300, height: 200)
+        let ctx = CGContext(pdf as CFURL, mediaBox: &box, nil)!
+        ctx.beginPDFPage(nil)
+        let line = CTLineCreateWithAttributedString(NSAttributedString(string: "Just text", attributes: [.font: NSFont.systemFont(ofSize: 14)]))
+        ctx.textPosition = CGPoint(x: 20, y: 100); CTLineDraw(line, ctx)
+        ctx.endPDFPage(); ctx.closePDF()
+        let size = MediaCompressor.fileSize(pdf)
+        let plan = InPlaceCompressor.plan([dir.path])
+        XCTAssertEqual(plan.photos.map(\.kind), [.pdf])
+        let r = await InPlaceCompressor.makeCopies(plan.photos, keepDetails: true, progress: { _, _ in }, cancelled: { false })
+        XCTAssertTrue(r.copies.isEmpty)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: pdf.path), "the original is never deleted")
+        XCTAssertEqual(MediaCompressor.fileSize(pdf), size)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: dir.path), ["Notes.pdf"], "no copies left behind")
+    }
+
+    /// A real video: written as H.264, compressed in place to HEVC, swapped in as .mov.
+    func testAVideoIsCompressedInPlace() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("apex-video-\(UUID())")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let mp4 = dir.appendingPathComponent("Clip.mp4")
+        let w = try AVAssetWriter(outputURL: mp4, fileType: .mp4)
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: [AVVideoCodecKey: AVVideoCodecType.h264, AVVideoWidthKey: 640, AVVideoHeightKey: 360,
+            AVVideoCompressionPropertiesKey: [AVVideoAverageBitRateKey: 8_000_000]])
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32ARGB, kCVPixelBufferWidthKey as String: 640, kCVPixelBufferHeightKey as String: 360])
+        w.add(input); w.startWriting(); w.startSession(atSourceTime: .zero)
+        var seed: UInt32 = 7
+        for f in 0..<60 {
+            while !input.isReadyForMoreMediaData { try await Task.sleep(for: .milliseconds(5)) }
+            var pb: CVPixelBuffer?
+            CVPixelBufferPoolCreatePixelBuffer(nil, adaptor.pixelBufferPool!, &pb)
+            CVPixelBufferLockBaseAddress(pb!, [])
+            let base = CVPixelBufferGetBaseAddress(pb!)!.assumingMemoryBound(to: UInt8.self)
+            let row = CVPixelBufferGetBytesPerRow(pb!)
+            for y in 0..<360 { for x in 0..<640 {
+                seed = seed &* 1664525 &+ 1013904223
+                let i = y * row + x * 4
+                base[i] = 255; base[i + 1] = UInt8((x + f * 4) % 256); base[i + 2] = UInt8((y + f * 2) % 256); base[i + 3] = UInt8(truncatingIfNeeded: (seed >> 24) / 8 + 100)
+            } }
+            CVPixelBufferUnlockBaseAddress(pb!, [])
+            adaptor.append(pb!, withPresentationTime: CMTime(value: CMTimeValue(f), timescale: 30))
+        }
+        input.markAsFinished(); await w.finishWriting()
+        XCTAssertEqual(w.status, .completed)
+        let before = MediaCompressor.fileSize(mp4)
+        let plan = InPlaceCompressor.plan([dir.path])
+        let r = await InPlaceCompressor.makeCopies(plan.photos, keepDetails: true, progress: { _, _ in }, cancelled: { false })
+        XCTAssertEqual(r.copies.count, 1, "\(r.skipped)")
+        guard let c = r.copies.first else { return }
+        XCTAssertLessThan(c.after, before)
+        XCTAssertEqual(c.finalURL.lastPathComponent, "Clip.mov")
+        XCTAssertTrue(InPlaceCompressor.swapIn(r.copies, permanently: true).isEmpty)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: dir.path), ["Clip.mov"])
+        let length = try await AVURLAsset(url: dir.appendingPathComponent("Clip.mov")).load(.duration).seconds
+        XCTAssertGreaterThan(length, 1.5, "a playable 2 s video")
+    }
+}
+
+final class CloudAnalyzeTests: XCTestCase {
+    func testPlace() {
+        XCTAssertEqual(CloudAnalyze.Status(total: 100_000, onMac: 0).place, .online)
+        XCTAssertEqual(CloudAnalyze.Status(total: 100_000, onMac: 100_000).place, .onMac)
+        XCTAssertEqual(CloudAnalyze.Status(total: 100_000, onMac: 30_000).place, .partly)
+        XCTAssertEqual(CloudAnalyze.Status(total: 100_000, onMac: 100_000, syncing: 2).place, .syncing)
+        XCTAssertTrue(CloudAnalyze.isCloud("/Users/u/Library/CloudStorage/Nextcloud-x/a", home: "/Users/u"))
+        XCTAssertTrue(CloudAnalyze.isCloud("/Users/u/Library/Mobile Documents/com~apple~CloudDocs/a", home: "/Users/u"))
+        XCTAssertFalse(CloudAnalyze.isCloud("/Users/u/Documents/a", home: "/Users/u"))
+    }
+
+    /// APEX_CLOUD_ANALYZE=1: the Nextcloud folder measured the cloud way (read-only), with timing.
+    func testRealCloudFolder() throws {
+        guard ProcessInfo.processInfo.environment["APEX_CLOUD_ANALYZE"] != nil,
+              let s = Cloud.detected().first(where: { $0.name == "Nextcloud" }) else { throw XCTSkip("set APEX_CLOUD_ANALYZE") }
+        for name in ((try? FileManager.default.contentsOfDirectory(atPath: s.path)) ?? []).sorted() where !name.hasPrefix(".") {
+            let t = Date()
+            let c = CloudAnalyze.measure(s.path + "/" + name)
+            print("ANALYZE \(name): \(Fmt.diskBytes(c.total)) total, \(Fmt.diskBytes(c.onMac)) on this Mac, place \(c.place), syncing \(c.syncing), unlisted \(c.unlisted), \(String(format: "%.1f", Date().timeIntervalSince(t))) s")
+        }
+    }
+}
+
+/// The menu bar's shelf row: pinned (categories, shelves minimized to the menu bar), a bar, then only
+/// the last two recently closed. APEX_RENDER_SHELFTAB=file.png renders it.
+final class ShelfMenuBarRowTests: XCTestCase {
+    @MainActor func testPinnedThenTheLastTwoRecentlyClosed() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("apex-row-\(UUID())")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        func file(_ n: String) throws -> URL { let u = dir.appendingPathComponent(n); try Data(n.utf8).write(to: u); return u }
+        let store = ShelfStore(folder: dir.appendingPathComponent("store"))
+        store.add([try file("a.pdf")]); let cat = store.newCategory(named: "Work"); _ = store.setPinned(cat, true)
+        store.add([try file("b.png")]); store.minimizeToSide(menuBar: true)
+        for n in ["c.txt", "d.txt", "e.txt"] { store.add([try file(n)]); store.newShelf() }
+        XCTAssertEqual(store.shelves.dropFirst().filter { !$0.items.isEmpty }.count, 3)
+        guard let out = ProcessInfo.processInfo.environment["APEX_RENDER_SHELFTAB"] else { return }
+        let host = NSHostingView(rootView: ShelfTab(store: store).frame(width: 380).padding(12)
+            .background(Color(white: 0.15)).environment(\.colorScheme, .dark))
+        host.frame = NSRect(origin: .zero, size: host.fittingSize)
+        host.layoutSubtreeIfNeeded()
+        let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds)!
+        host.cacheDisplay(in: host.bounds, to: rep)
+        try rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: out))
     }
 }

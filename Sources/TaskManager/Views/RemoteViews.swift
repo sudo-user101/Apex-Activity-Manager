@@ -7,21 +7,107 @@ import SwiftUI
 private struct RemoteStatus: View {
     let server: ServerConfig
     private let store = ServerStore.shared
+    @State private var pairing = false
 
     var body: some View {
-        if let e = store.errors[server.id], store.snapshots[server.id] == nil {
+        if let c = store.localContainer(server), !c.running {
             ContentUnavailableView {
-                Label("Can’t read \(server.name)", systemImage: "exclamationmark.triangle")
+                Label("\(server.name) is \(c.state == "paused" ? "paused" : "stopped")", systemImage: "stop.circle")
             } description: {
-                Text(e.message)
+                Text(c.status)
             } actions: {
-                Button("Try Again") { Task { await store.refresh(server) } }
+                PowerButtons(server: server, large: true)
+            }
+        } else if let e = store.errors[server.id], store.snapshots[server.id] == nil {
+            let st = store.status(server)
+            ContentUnavailableView {
+                if StatusDot.isOffline(st) {
+                    Label { Text("\(server.name) is offline") } icon: { Image(systemName: "circle.fill").foregroundStyle(.red) }
+                } else {
+                    Label("Can’t read \(server.name)", systemImage: "exclamationmark.triangle")
+                }
+            } description: {
+                Text(StatusDot.isOffline(st) ? (StatusDot.text(st).map { String($0.dropFirst("Offline · ".count)) } ?? e.message) : e.message)
+            } actions: {
+                HStack {
+                    if server.isEdition { Button("Pair Again…") { pairing = true }.buttonStyle(.borderedProminent) }
+                    Button("Try Again") { Task { await store.refresh(server) } }
+                }
+            }
+            .sheet(isPresented: $pairing) {
+                ServerEditor(server: server) { s in store.update(s); Task { await store.refresh(s) } }
             }
         } else {
             VStack(spacing: 10) {
                 ProgressView()
                 Text(server.isLocal ? "Reading \(server.name)…" : "Connecting to \(server.name)…").foregroundStyle(.secondary)
             }
+        }
+    }
+}
+
+/// ▶ Resume and ■ Stop for the server or container being shown (`MachinePower`).
+/// Stop asks first: it ends every process and connection on it.
+struct PowerButtons: View {
+    let server: ServerConfig
+    var large = false
+    private let store = ServerStore.shared
+    @State private var asking = false
+    @State private var working = false
+    @State private var problem: String?
+
+    private var kind: MachinePower.Kind { MachinePower.kind(server) }
+    private var local: ServerSnapshot.Container? { store.localContainer(server) }
+    /// On as far as Apex can tell: running, or read without trouble just now.
+    private var isOn: Bool {
+        if let local { return local.running }
+        return store.snapshots[server.id] != nil && store.errors[server.id] == nil
+    }
+    private var canResume: Bool { kind == .server ? (!isOn && server.mac != nil) : !isOn }
+
+    var body: some View {
+        HStack(spacing: large ? 10 : 4) {
+            if working { ProgressView().controlSize(.small) }
+            button("Resume", "play.fill", enabled: canResume && !working, help: resumeHelp) { go(resume: true) }
+            button("Stop", "stop.fill", enabled: isOn && !working, help: kind == .server ? "Shut down \(server.name)" : "Stop \(server.name)") { asking = true }
+        }
+        .confirmationDialog(kind == .server ? "Shut down \(server.name)?" : "Stop \(server.name)?", isPresented: $asking) {
+            Button(kind == .server ? "Shut Down" : "Stop", role: .destructive) { go(resume: false) }
+        } message: {
+            Text(kind == .server
+                 ? "Every process and connection on it stops and the machine powers off." + (server.mac == nil ? " Apex can’t switch it back on: start it where it runs." : " Resume can wake it again with Wake-on-LAN if its network card allows it.")
+                 : "Every process in it stops and its connections close. Resume starts it again.")
+        }
+        .alert("Didn’t work", isPresented: Binding(get: { problem != nil }, set: { if !$0 { problem = nil } })) {
+            Button("OK") { problem = nil }
+        } message: { Text(problem ?? "") }
+    }
+
+    private var resumeHelp: String {
+        switch kind {
+        case .server: server.mac == nil ? "Apex learns the server’s network card while it’s on; then Resume can wake it (Wake-on-LAN, same network)" : "Wake \(server.name) (Wake-on-LAN)"
+        default: local?.state == "paused" ? "Unpause \(server.name)" : "Start \(server.name)"
+        }
+    }
+
+    @ViewBuilder private func button(_ title: String, _ symbol: String, enabled: Bool, help: String, action: @escaping () -> Void) -> some View {
+        if large {
+            Button(action: action) { Label(title, systemImage: symbol) }.disabled(!enabled).help(help)
+        } else {
+            Button(action: action) { Image(systemName: symbol) }.buttonStyle(.borderless).disabled(!enabled).help(help)
+        }
+    }
+
+    private func go(resume: Bool) {
+        working = true
+        let s = server, paused = local?.state == "paused"
+        Task {
+            let r = await Task.detached(priority: .userInitiated) { MachinePower.run(s, resume: resume, paused: paused) }.value
+            if s.isLocal { await store.refreshLocal() }
+            try? await Task.sleep(for: .seconds(1))
+            await store.refresh(s)
+            working = false
+            problem = r
         }
     }
 }
@@ -164,6 +250,7 @@ private struct ServerInfoPanel: View {
             HStack {
                 MachinePicker()
                 Spacer()
+                PowerButtons(server: server)
                 Button { adding = true } label: { Image(systemName: "plus") }
                     .buttonStyle(.borderless).help("Add a server")
             }
@@ -266,6 +353,7 @@ private struct RemoteDetail: View {
                         .font(.callout)
                     }
                 }
+                if let w = s.webTraffic { webTraffic(w) }
             case .gpu:
                 PageHeader(title: "GPU", subtitle: s.gpus?.map(\.name).joined(separator: ", ") ?? "", showsRange: false)
                 graph([.init(values: store.gpuHistory[server.id] ?? [], color: item.color)], max: 100, unit: .percent)
@@ -412,6 +500,81 @@ private struct RemoteDetail: View {
                 }
             }
         }
+    }
+
+    /// The web server's traffic from its access log (last 10 minutes).
+    @ViewBuilder private func webTraffic(_ w: ServerSnapshot.WebTraffic) -> some View {
+        box {
+            HStack {
+                Text("Web traffic").font(.headline)
+                Spacer()
+                Text(w.log ?? "").font(.caption).foregroundStyle(.tertiary).lineLimit(1).truncationMode(.middle)
+            }
+            if w.readable == false {
+                Text("Apex can’t read this log with your SSH user. Add the user to the log’s group (often adm) to see the traffic.")
+                    .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            } else if w.requests == 0 {
+                Text("No requests in the last 10 minutes.").font(.callout).foregroundStyle(.secondary)
+            } else {
+                stats(Self.webRows(w))
+                if let st = w.statuses, w.requests > 0 {
+                    let kinds: [(key: String, name: String, color: Color)] = [("2xx", "Worked", .green), ("3xx", "Redirected", .blue),
+                                                                               ("4xx", "Not found or refused", .orange), ("5xx", "Server error", .red)]
+                    StackedBar(parts: kinds.map { StackedBar.Part(value: Double(st[$0.key] ?? 0), color: $0.color) }, total: Double(w.requests))
+                    HStack(spacing: 14) {
+                        ForEach(kinds, id: \.key) { k in
+                            HStack(spacing: 5) {
+                                RoundedRectangle(cornerRadius: 2).fill(k.color).frame(width: 10, height: 10)
+                                Text("\(k.name) \(st[k.key] ?? 0)").monospacedDigit()
+                            }
+                        }
+                    }
+                    .font(.caption)
+                }
+                HStack(alignment: .top, spacing: 18) {
+                    counts("Most requested", (w.topPaths ?? []).map { ($0.path ?? "", $0.count) })
+                    counts("Busiest visitors", (w.topClients ?? []).map { ($0.ip ?? "", $0.count) })
+                }
+                if let e = w.errors, !e.isEmpty { counts("Failing", e.map { ($0.what ?? "", $0.count) }) }
+                if let sc = w.scanners, !sc.isEmpty {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Probing the site").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                        ForEach(sc, id: \.self) { x in
+                            HStack {
+                                Text(x.ip).monospacedDigit().textSelection(.enabled)
+                                Spacer()
+                                Text("\(x.notFound) not found · \(x.probes) attack paths").foregroundStyle(.orange).monospacedDigit()
+                            }
+                            .font(.callout)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    static func webRows(_ w: ServerSnapshot.WebTraffic) -> [(String, String)] {
+        var rows = [("Requests", "\(w.requests) in \(ServerInsights.minutes(w.window))")]
+        if let pm = w.perMinute { rows.append(("Per minute", String(format: "%.0f", pm))) }
+        rows.append(("Server errors", "\(w.serverErrors) (\(Int((w.errorShare * 100).rounded()))%)"))
+        if let b = w.bytes { rows.append(("Sent", Fmt.bytes(UInt64(max(0, b))))) }
+        if let bots = w.bots, w.requests > 0 { rows.append(("Bots and scripts", "\(bots) (\(bots * 100 / w.requests)%)")) }
+        return rows
+    }
+
+    private func counts(_ title: String, _ items: [(String, Int)]) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            ForEach(Array(items.prefix(5).enumerated()), id: \.offset) { _, i in
+                HStack {
+                    Text(i.0).lineLimit(1).truncationMode(.middle).textSelection(.enabled)
+                    Spacer()
+                    Text("\(i.1)").monospacedDigit().foregroundStyle(.secondary)
+                }
+                .font(.callout)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func box(@ViewBuilder _ content: () -> some View) -> some View {

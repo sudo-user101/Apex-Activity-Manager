@@ -283,6 +283,18 @@ final class CloudStore {
     /// Stops waiting for uploads (files already offloaded stay offloaded).
     func stopOffload(_ s: CloudService) { offload[s.id]?.stopped = true }
 
+    /// Cloud space › Move to Trash: what moved, what didn't and why; then checks again.
+    func trash(_ s: CloudService, _ items: [CloudEntry]) async -> String {
+        let r = await Task.detached(priority: .userInitiated) { Cloud.trash(items) }.value
+        refresh(s, force: true)
+        var text = r.moved == 0 ? "" : "Moved \(r.moved) file\(r.moved == 1 ? "" : "s") (\(Fmt.diskBytes(r.freed))) to the Trash. \(s.name) frees the space once it has synced."
+        if !r.failed.isEmpty {
+            text += (text.isEmpty ? "" : " ") + "\(r.failed.count) couldn’t be moved (\(s.name) didn’t allow it): remove "
+                + (r.failed.count == 1 ? "“\(r.failed[0])”" : "them") + " on \(s.name)’s website or in Finder."
+        }
+        return text
+    }
+
     /// Pauses the offload / check: nothing is offloaded and the app's traffic
     /// isn't read, but Apex keeps an eye out and carries on by itself when
     /// the connection comes back or the service's app starts syncing again.
@@ -506,20 +518,25 @@ struct CloudDetail: View {
     @State private var connect: (CloudService, String)?
     @State private var entering: CloudService?
     private let store = CloudStore.shared
+    static let overviewTab = "overview"
 
     var body: some View {
         let list = store.services
-        let s = list.first { $0.id == tab } ?? list.first
+        let s = list.first { $0.id == tab }
+        // Overview first: it's where everyone starts (and where an unknown tab lands).
+        let overview = !list.isEmpty && s == nil
         VStack(alignment: .leading, spacing: 16) {
             HStack {
-                if list.count > 1 {
-                    TabStrip(tabs: list.map { ($0.id, $0.name, $0.symbol) }, selected: s?.id ?? "") { tab = $0; pick = []; note = nil }
+                if !list.isEmpty {
+                    TabStrip(tabs: [(Self.overviewTab, "Overview", "square.grid.2x2")] + list.map { ($0.id, $0.name, $0.symbol) },
+                             selected: overview ? Self.overviewTab : (s?.id ?? "")) { tab = $0; pick = []; note = nil }
                 }
                 Spacer()
                 Button { adding = true } label: { Label("Add", systemImage: "plus") }
                     .help("Add your own service: a folder on this Mac, or a server (Nextcloud, ownCloud, a NAS…)")
             }
-            if let s { page(s) }
+            if overview { CloudOverviewView(onOpen: { tab = $0; pick = []; note = nil }) }
+            else if let s { page(s) }
             else {
                 ContentUnavailableView("No Cloud Disks", systemImage: "icloud.slash",
                                        description: Text("Turn on iCloud Drive or install OneDrive, Google Drive, Dropbox or Nextcloud, or add your own with +."))
@@ -610,6 +627,7 @@ struct CloudDetail: View {
         }
         statsGrid(stats(s, u, q))
         connectBanner(s, q)
+        if let sp = u?.space, sp.totalBytes > 0 { CloudSpaceSection(service: s, overview: sp).id(s.id) }
         if let p = store.problem[s.id] { Label(p, systemImage: "exclamationmark.triangle").foregroundStyle(.orange) }
 
         // Offload everything stored here (shown while a check or offload runs, even before the folder is measured).
@@ -707,6 +725,9 @@ struct CloudDetail: View {
                                 }
                                 Spacer()
                                 Text(Fmt.diskBytes(f.bytes)).monospacedDigit().foregroundStyle(.secondary)
+                                Button { delete(s, f) } label: { Image(systemName: "trash") }
+                                    .buttonStyle(.borderless)
+                                    .help("Move to the Trash. It’s removed from \(s.name) online too once it syncs; you can put it back from the Trash.")
                             }
                         }
                         .toggleStyle(.checkbox)
@@ -732,8 +753,10 @@ struct CloudDetail: View {
             ("Files", u.map { "\($0.files)" + ($0.partial ? "+" : "") } ?? "—"),
             ("On this Mac", u.map { Fmt.diskBytes($0.onMacBytes) } ?? "—"),
             ("Online only", u.map { "\($0.onlineOnly) files" } ?? "—"),
-            ("In the folder", u.map { Fmt.diskBytes($0.totalBytes) } ?? "—"),
+            ("In the folder", u.map { Fmt.diskBytes($0.totalBytes) + ($0.unlistedFolders > 0 ? "+" : "") } ?? "—"),
         ]
+        // Folders only in the cloud aren't opened (that would ask the server, and waits when it can't answer).
+        if let n = u?.unlistedFolders, n > 0 { out.append(("Folders only online", "\(n) (not counted)")) }
         let online: String
         if let q, let total = q.total { online = "\(Fmt.diskBytes(q.used)) of \(Fmt.diskBytes(total))" }
         else if let q { online = Fmt.diskBytes(q.used) }
@@ -777,6 +800,12 @@ struct CloudDetail: View {
         }
     }
 
+    /// A file's trash button: to the Trash, then the folder is measured again.
+    private func delete(_ s: CloudService, _ f: CloudFile) {
+        pick.remove(f.path)
+        Task { note = await store.trash(s, [CloudEntry(path: f.path, bytes: f.bytes, onMac: f.bytes)]) }
+    }
+
     private func freeUp(_ s: CloudService, _ files: [CloudFile]) {
         let waiting = files.filter(\.uploading).count
         store.offloadAll(s, files: files)
@@ -786,11 +815,14 @@ struct CloudDetail: View {
     }
 }
 
-/// Add a cloud disk: pick a provider from the catalogue (or "Other"), then
-/// how to connect: its storage page (web sign-in), WebDAV, or a folder.
-private struct AddCloudSheet: View {
+/// Add a cloud disk, one step at a time: choose a provider (what each
+/// offers is on its card) → connect (sign in on the web, a WebDAV server or a
+/// folder, with checks next to each field) → a summary of what Apex will show.
+struct AddCloudSheet: View {
     enum Method: String, CaseIterable { case web = "Sign in on the web", webdav = "WebDAV server", folder = "Folder on this Mac" }
+    enum Step { case choose, connect, summary }
     @Environment(\.dismiss) private var dismiss
+    @State private var step = Step.choose
     @State private var provider: CloudProvider?
     @State private var search = ""
     @State private var method = Method.web
@@ -800,76 +832,45 @@ private struct AddCloudSheet: View {
     @State private var password = ""
     @State private var folder = ""
     @State private var testing = false
-    @State private var result: String?
+    enum Tested { case ok(String), failed(String) }
+    @State private var tested: Tested?
     @State private var signIn: (page: String, store: UUID)?
 
-    private static let other = CloudProvider(name: "Other provider", note: "Enter its storage page or WebDAV address.",
+    private static let other = CloudProvider(name: "Other provider", note: "Any service with a storage page or a WebDAV address.",
                                              storagePage: "https://", webdav: "https://", appFolder: nil)
+    private var all: [CloudProvider] { CloudCatalog.providers + [Self.other] }
+
+    init() {}
+    /// Opened at a later step (off-screen render tests).
+    init(step: Step, provider p: CloudProvider, method m: Method? = nil) {
+        _step = State(initialValue: step)
+        _provider = State(initialValue: p)
+        _name = State(initialValue: p.name)
+        let ms = (p.storagePage != nil ? [Method.web] : []) + (p.webdav != nil ? [.webdav] : []) + [.folder]
+        let chosen = m ?? ms[0]
+        _method = State(initialValue: chosen)
+        _url = State(initialValue: chosen == .web ? (p.storagePage ?? "https://") : (p.webdav ?? "https://"))
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Add a Cloud Disk").font(.title3.weight(.semibold))
-            HStack(alignment: .top, spacing: 14) {
-                VStack(spacing: 6) {
-                    TextField("Search providers", text: $search).textFieldStyle(.roundedBorder)
-                    List(selection: Binding(get: { provider?.name }, set: { n in choose((CloudCatalog.providers + [Self.other]).first { $0.name == n }) })) {
-                        ForEach((CloudCatalog.providers + [Self.other]).filter { search.isEmpty || $0.name.localizedCaseInsensitiveContains(search) }) { p in
-                            Text(p.name).tag(p.name)
-                        }
-                    }
-                    .listStyle(.bordered)
+        VStack(alignment: .leading, spacing: 16) {
+            header
+            Group {
+                switch step {
+                case .choose: chooseStep
+                case .connect: connectStep
+                case .summary: summaryStep
                 }
-                .frame(width: 210, height: 330)
-                VStack(alignment: .leading, spacing: 10) {
-                    if let p = provider {
-                        Text(p.name).font(.headline)
-                        if !p.note.isEmpty { Text(p.note).font(.callout).foregroundStyle(.secondary) }
-                        if p.appFolder != nil {
-                            Label("Its Mac app adds a tab here by itself when installed.", systemImage: "app.badge.checkmark")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                        Picker("", selection: $method) {
-                            ForEach(methods(p), id: \.self) { Text($0.rawValue).tag($0) }
-                        }
-                        .pickerStyle(.segmented).labelsHidden()
-                        Form {
-                            TextField("Name", text: $name)
-                            switch method {
-                            case .web:
-                                TextField("Storage page", text: $url)
-                                Text("You sign in on the provider’s own page inside Apex; Apex reads the “used of total” line.")
-                                    .font(.caption).foregroundStyle(.secondary)
-                            case .webdav:
-                                TextField("WebDAV address", text: $url)
-                                TextField("User name", text: $user)
-                                SecureField("Password or app password", text: $password)
-                            case .folder:
-                                HStack { TextField("Folder", text: $folder).disabled(true); Button("Choose…") { chooseFolder() } }
-                            }
-                        }
-                        if let result { Text(result).font(.callout).foregroundStyle(result.hasPrefix("Connected") ? .green : .orange) }
-                    } else {
-                        Text("Choose a provider").foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .topLeading)
             }
-            HStack {
-                Text(method == .webdav ? "Passwords are kept in your keychain." : "Nothing is changed on the provider.")
-                    .font(.caption).foregroundStyle(.tertiary)
-                Spacer()
-                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
-                if method == .webdav, provider != nil { Button(testing ? "Checking…" : "Test") { test() }.disabled(testing) }
-                Button(method == .web ? "Sign In…" : "Add") { add() }.keyboardShortcut(.defaultAction)
-                    .disabled(provider == nil || name.isEmpty || (method == .folder ? folder.isEmpty : url.count < 10))
-            }
+            .frame(height: 360, alignment: .top)
+            footer
         }
-        .padding(20).frame(width: 640)
+        .padding(22).frame(width: 640)
+        .animation(.easeInOut(duration: 0.18), value: step)
         .sheet(isPresented: Binding(get: { signIn != nil }, set: { if !$0 { signIn = nil } })) {
             if let si = signIn {
                 WebStorageSheet(title: name, page: si.page, storeID: si.store) { q in
-                    let s = CloudService(id: "custom:" + UUID().uuidString, name: name, kind: .web,
-                                         webPage: si.page, webStore: si.store.uuidString)
+                    let s = CloudService(id: "custom:" + UUID().uuidString, name: name, kind: .web, webPage: si.page, webStore: si.store.uuidString)
                     CloudStore.shared.add(s, password: nil)
                     CloudStore.shared.connectWeb(s, page: si.page, store: si.store, quota: q)
                     dismiss()
@@ -878,13 +879,174 @@ private struct AddCloudSheet: View {
         }
     }
 
+    // MARK: Steps
+
+    private var header: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "cloud").font(.title2).foregroundStyle(.tint)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Add a Cloud Disk").font(.title3.weight(.semibold))
+                Text(["1 · Choose the service", "2 · Connect it", "3 · Check and add"][step == .choose ? 0 : step == .connect ? 1 : 2])
+                    .font(.callout).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var chooseStep: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            TextField("Search services", text: $search).textFieldStyle(.roundedBorder)
+            ScrollView {
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
+                    ForEach(all.filter { search.isEmpty || $0.name.localizedCaseInsensitiveContains(search) }) { p in
+                        Button { choose(p) } label: { card(p) }.buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+    }
+
+    private func card(_ p: CloudProvider) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(p.name).font(.headline)
+            if !p.note.isEmpty { Text(p.note).font(.caption).foregroundStyle(.secondary).lineLimit(2) }
+            HStack(spacing: 4) {
+                if p.appFolder != nil { badge("Mac app", "app.badge.checkmark") }
+                if p.storagePage != nil { badge("Web sign-in", "globe") }
+                if p.webdav != nil { badge("WebDAV", "server.rack") }
+            }
+        }
+        .padding(10).frame(maxWidth: .infinity, minHeight: 84, alignment: .topLeading)
+        .background(provider?.name == p.name ? Color.accentColor.opacity(0.18) : Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(provider?.name == p.name ? Color.accentColor : .clear, lineWidth: 1.5))
+        .contentShape(RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func badge(_ text: String, _ symbol: String) -> some View {
+        Label(text, systemImage: symbol).font(.caption2).labelStyle(.titleAndIcon)
+            .padding(.horizontal, 6).padding(.vertical, 2).background(Color.primary.opacity(0.07), in: Capsule())
+    }
+
+    @ViewBuilder private var connectStep: some View {
+        if let p = provider {
+            VStack(alignment: .leading, spacing: 12) {
+                if p.appFolder != nil {
+                    Label("Its Mac app adds \(p.name) here by itself once installed and signed in. Connecting here adds online storage figures.", systemImage: "app.badge.checkmark")
+                        .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+                if methods(p).count > 1 {
+                    Picker("How", selection: $method) { ForEach(methods(p), id: \.self) { Text($0.rawValue).tag($0) } }
+                        .pickerStyle(.segmented).labelsHidden()
+                }
+                Form {
+                    field { TextField("Name", text: $name) } error: { name.trimmingCharacters(in: .whitespaces).isEmpty ? "Give it a name." : nil }
+                    switch method {
+                    case .web:
+                        field { TextField("Storage page", text: $url) } error: { urlError }
+                        Text("You sign in on the service’s own page, inside Apex. Apex reads the “used of total” line there; nothing is changed.").settingsCaption()
+                    case .webdav:
+                        field { TextField("WebDAV address", text: $url) } error: { urlError }
+                        TextField("User name", text: $user)
+                        SecureField("Password or app password", text: $password)
+                        HStack {
+                            Button(testing ? "Checking…" : "Test Connection") { test() }.disabled(testing || URL(string: url)?.host == nil)
+                            switch tested {
+                            case .ok(let t): Label(t, systemImage: "checkmark.circle.fill").foregroundStyle(.green).font(.callout)
+                            case .failed(let t): Label(t, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange).font(.callout)
+                            case nil: EmptyView()
+                            }
+                        }
+                    case .folder:
+                        field { HStack { TextField("Folder", text: $folder).disabled(true); Button("Choose…") { chooseFolder() } } }
+                            error: { folder.isEmpty ? "Choose the folder it syncs into." : nil }
+                    }
+                }
+                .formStyle(.grouped).scrollDisabled(true).scrollContentBackground(.hidden).padding(.horizontal, -20)
+            }
+        }
+    }
+
+    private var summaryStep: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(name).font(.title2.bold())
+                if let p = provider, p.name != name { Text(p.name).foregroundStyle(.secondary) }
+                if method != .folder { Text(url).font(.callout).foregroundStyle(.secondary) }
+            }
+            Text("What Apex will show").font(.headline)
+            Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 10, verticalSpacing: 10) {
+                switch method {
+                case .web:
+                    point("globe", "Online storage: used of total, read from \(host(url)) after you sign in")
+                    point("lock", "Your sign-in stays in Apex’s own browser storage for this service")
+                case .webdav:
+                    point("server.rack", "Online storage: used of total, read live from the WebDAV server")
+                    point("key", "Your password is kept in your keychain")
+                case .folder:
+                    point("folder", "What’s in “\((folder as NSString).lastPathComponent)” on this Mac, and what’s online-only")
+                }
+                point("checkmark.circle", "A tab under Cloud Disks; nothing is changed on the service")
+            }
+            .font(.callout)
+        }
+    }
+
+    private func point(_ symbol: String, _ text: String) -> some View {
+        GridRow {
+            Image(systemName: symbol).foregroundStyle(.secondary).frame(width: 20)
+            Text(text).fixedSize(horizontal: false, vertical: true).frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var footer: some View {
+        HStack {
+            Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+            Spacer()
+            if step != .choose { Button("Back") { step = step == .summary ? .connect : .choose } }
+            switch step {
+            case .choose: Button("Continue") { step = .connect }.keyboardShortcut(.defaultAction).disabled(provider == nil)
+            case .connect: Button("Continue") { step = .summary }.keyboardShortcut(.defaultAction).disabled(!connectReady)
+            case .summary: Button(method == .web ? "Sign In…" : "Add") { add() }.keyboardShortcut(.defaultAction)
+            }
+        }
+    }
+
+    // MARK: Checks
+
+    /// A field with its problem written right under it.
+    private func field<F: View>(@ViewBuilder _ f: () -> F, error: () -> String?) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            f()
+            if let e = error() { Text(e).font(.caption).foregroundStyle(.orange) }
+        }
+    }
+
+    private var urlError: String? { Self.addressProblem(url) }
+
+    /// What's wrong with a service address, written for the field. Pure: tested.
+    static func addressProblem(_ s: String) -> String? {
+        guard let u = URL(string: s.trimmingCharacters(in: .whitespaces)), let scheme = u.scheme?.lowercased(), ["https", "http"].contains(scheme),
+              let h = u.host, h.contains(".") || h == "localhost" else {
+            return "Enter the full address, starting with https://"
+        }
+        return scheme == "http" ? "This address isn’t encrypted (http). Use https:// if the service offers it." : nil
+    }
+
+    private var connectReady: Bool {
+        guard !name.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
+        switch method {
+        case .folder: return !folder.isEmpty
+        default: return URL(string: url)?.host != nil
+        }
+    }
+
+    private func host(_ s: String) -> String { URL(string: s)?.host ?? s }
+
     private func methods(_ p: CloudProvider) -> [Method] {
         (p.storagePage != nil ? [.web] : []) + (p.webdav != nil ? [.webdav] : []) + [.folder]
     }
 
-    private func choose(_ p: CloudProvider?) {
-        provider = p; result = nil
-        guard let p else { return }
+    private func choose(_ p: CloudProvider) {
+        provider = p; tested = nil
         name = p.name == Self.other.name ? "" : p.name
         method = methods(p).first ?? .folder
         url = method == .web ? (p.storagePage ?? "https://") : (p.webdav ?? "https://")
@@ -897,11 +1059,11 @@ private struct AddCloudSheet: View {
     }
 
     private func test() {
-        testing = true; result = nil
+        testing = true; tested = nil
         Task {
             switch await Cloud.quota(url: url, username: user, password: password) {
-            case .success(let q): result = "Connected: \(Fmt.diskBytes(q.used)) used" + (q.total.map { " of \(Fmt.diskBytes($0))" } ?? "")
-            case .failure(let e): result = e.localizedDescription
+            case .success(let q): tested = .ok("Connected: \(Fmt.diskBytes(q.used)) used" + (q.total.map { " of \(Fmt.diskBytes($0))" } ?? ""))
+            case .failure(let e): tested = .failed(e.localizedDescription)
             }
             testing = false
         }
@@ -910,8 +1072,7 @@ private struct AddCloudSheet: View {
     private func add() {
         let id = "custom:" + UUID().uuidString
         switch method {
-        case .web:
-            signIn = (url, UUID())
+        case .web: signIn = (url, UUID())
         case .webdav:
             CloudStore.shared.add(CloudService(id: id, name: name, kind: .webdav, url: url, username: user), password: password)
             dismiss()

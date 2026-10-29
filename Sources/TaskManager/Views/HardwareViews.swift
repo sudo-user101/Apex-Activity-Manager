@@ -16,10 +16,15 @@ final class HardwareStore {
     private(set) var batteryTempHistory: [Double] = []
     private(set) var cpuTempTimes: [Date] = []
     private(set) var loaded = false
-    /// Battery charge every minute for the last 12 hours (recorded even
+    /// Battery charge every minute for the last 24 hours (recorded even
     /// while the window is closed, from the regular sample).
     private(set) var chargeHistory: [Double] = []
-    @ObservationIgnored private var chargeTimes: [Date] = []
+    @ObservationIgnored private(set) var chargeTimes: [Date] = []
+    /// Learns this Mac's draw on battery for the time-left estimate (kept across launches).
+    private(set) var learner: BatteryLearner = {
+        guard let d = UserDefaults.standard.data(forKey: "batteryLearner") else { return BatteryLearner() }
+        return (try? JSONDecoder().decode(BatteryLearner.self, from: d)) ?? BatteryLearner()
+    }()
     private(set) var onBatterySince: Date?
     @ObservationIgnored private var lastChargeSample = Date.distantPast
     @ObservationIgnored private var sawBattery = true
@@ -38,7 +43,7 @@ final class HardwareStore {
         loadedCharge = true
         guard let d = try? Data(contentsOf: Self.chargeURL),
               let saved = try? JSONDecoder().decode(SavedCharge.self, from: d) else { return }
-        let cutoff = Date().addingTimeInterval(-12 * 3600)
+        let cutoff = Date().addingTimeInterval(-24 * 3600)
         let keep = zip(saved.times, saved.values).filter { $0.0 >= cutoff }
         chargeTimes = keep.map(\.0)
         chargeHistory = keep.map(\.1)
@@ -59,7 +64,16 @@ final class HardwareStore {
         guard b.present, b.designCapacity > 0 else { sawBattery = false; return }
         chargeHistory.append(Double(b.percent))
         chargeTimes.append(Date())
-        let cutoff = Date().addingTimeInterval(-12 * 3600)
+        // On battery: learn the draw and which apps make it.
+        if !b.onAC, let watts = b.systemPower ?? (b.batteryPower > 0 ? b.batteryPower : nil) {
+            var apps: [String: Double] = [:]
+            for p in AppModel.shared.snapshot.processes where p.power > 0 {
+                apps[p.appName ?? p.name, default: 0] += p.power
+            }
+            learner.learn(watts: watts, apps: apps)
+            if let d = try? JSONEncoder().encode(learner) { UserDefaults.standard.set(d, forKey: "batteryLearner") }
+        }
+        let cutoff = Date().addingTimeInterval(-24 * 3600)
         while let first = chargeTimes.first, first < cutoff { chargeTimes.removeFirst(); chargeHistory.removeFirst() }
         saveCharge()
         if b.onAC { onBatterySince = nil } else if onBatterySince == nil { onBatterySince = Date() }
@@ -221,17 +235,28 @@ struct EnergyDetail: View {
             }
             if store.hasBattery {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("BATTERY (LAST 12 HOURS)").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                    ChargeGraph(values: store.chargeHistory)
+                    // The useful period: since you unplugged (at least an hour), else the last 12 hours.
+                    let since = store.onBatterySince.map { min($0, Date().addingTimeInterval(-3600)) } ?? Date().addingTimeInterval(-12 * 3600)
+                    let shown = zip(store.chargeTimes, store.chargeHistory).filter { $0.0 >= since }.map(\.1)
+                    Text(store.onBatterySince != nil ? "BATTERY (SINCE UNPLUGGED)" : "BATTERY (LAST 12 HOURS)").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    ChargeGraph(values: shown)
                         .frame(height: 110)
-                    Text(store.chargeHistory.count < 2 ? "Recording — fills in over time" : "One point per minute")
+                    Text(shown.count < 2 ? "Recording — fills in over time" : "One point per minute")
                         .font(.caption).foregroundStyle(.secondary)
+                    if !b.onAC, let e = store.learner.estimate(percent: b.percent, capacityMAh: b.maxCapacity, volts: b.voltage) {
+                        Text(BatteryLearner.describe(e)).font(.callout.weight(.medium)).fixedSize(horizontal: false, vertical: true)
+                        Text("Between \(Fmt.minutes(Int(e.low))) and \(Fmt.minutes(Int(e.high))), \(e.basis). An estimate, learned on this Mac.")
+                            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
                 }
                 VStack(alignment: .leading, spacing: 10) {
                     stat("Power mode", PowerMode.current().title)
                     stat("Charge limit", FanController.shared.chargeLimit.map { "\($0)%" + (FanController.shared.status?.chargingBlocked == true ? " · holding" : "") } ?? "Off")
                     stat(b.isCharging ? "Time until full" : "Time until empty",
-                         b.minutesRemaining.map { Fmt.minutes($0) } ?? (b.fullyCharged ? "—" : "Calculating…"))
+                         b.isCharging || b.onAC
+                            ? (b.minutesRemaining.map { Fmt.minutes($0) } ?? (b.fullyCharged ? "—" : "Calculating…"))
+                            : (store.learner.estimate(percent: b.percent, capacityMAh: b.maxCapacity, volts: b.voltage).map { "about " + Fmt.minutes(Int($0.minutes.rounded())) }
+                               ?? b.minutesRemaining.map { Fmt.minutes($0) } ?? "Learning…"))
                     stat("Time on battery", store.onBatterySince.map { Fmt.duration(Date().timeIntervalSince($0)) } ?? (b.onAC ? "On power adapter" : "—"))
                 }
                 .frame(width: 190, alignment: .leading)

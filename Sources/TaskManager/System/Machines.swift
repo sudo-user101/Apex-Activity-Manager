@@ -190,10 +190,21 @@ enum LocalDocker {
     /// Runs a `docker …` command (start, stop, restart, exec … kill). Anything
     /// else is refused: a container's commands must never run on this Mac itself.
     static func action(_ command: String) -> Shell.Result {
-        guard command.hasPrefix("docker "), let docker = path else {
+        guard command.hasPrefix("docker "), Self.isPlainCommand(command), let docker = path else {
             return Shell.Result(launched: false, status: -1, stdout: "", stderr: "Only Docker commands run for a container on this Mac.")
         }
         return Shell.run("/bin/sh", ["-c", Shell.quote(docker) + command.dropFirst(6)])
+    }
+
+    /// No shell operators outside single quotes (`;`, `&`, `|`, `$`, a backtick,
+    /// redirects, new lines), so nothing after "docker …" can run on the Mac itself. Pure: tested.
+    static func isPlainCommand(_ c: String) -> Bool {
+        var quoted = false
+        for ch in c {
+            if ch == "'" { quoted.toggle(); continue }
+            if !quoted, ";&|`$<>\n\\".contains(ch) { return false }
+        }
+        return !quoted
     }
 
     /// Docker's error → plain words. Pure: tested.
@@ -204,5 +215,147 @@ enum LocalDocker {
         }
         let line = stderr.split(separator: "\n").last.map(String.init) ?? ""
         return line.isEmpty ? "Docker didn’t answer." : line
+    }
+}
+
+/// Resume and Stop for the machine being shown: a container (on this Mac or
+/// on a server) is started / unpaused and stopped; a server is shut down,
+/// and woken with Wake-on-LAN when its network card is known (a machine
+/// that's off can't be reached any other way).
+enum MachinePower {
+    enum Kind: Equatable { case localContainer, serverContainer, server }
+
+    static func kind(_ s: ServerConfig) -> Kind {
+        s.isLocal ? .localContainer : (s.container.isEmpty ? .server : .serverContainer)
+    }
+
+    /// The command for a container, run where the container lives. Pure: tested.
+    static func containerCommand(_ s: ServerConfig, resume: Bool, paused: Bool) -> String {
+        ServerCommands.container(resume ? (paused ? "unpause" : "start") : "stop", s.container)
+    }
+
+    static let shutDownCommand = "sudo systemctl poweroff"
+
+    /// Does it (blocking). nil = done; otherwise what went wrong, in words.
+    static func run(_ s: ServerConfig, resume: Bool, paused: Bool = false) -> String? {
+        switch kind(s) {
+        case .localContainer, .serverContainer:
+            var host = s; host.container = ""             // docker runs beside the container, not in it
+            let r = ServerClient.action(s.isLocal ? s : host, containerCommand(s, resume: resume, paused: paused))
+            return r.status == 0 ? nil : (r.stderr.isEmpty ? "Docker didn’t do it." : r.stderr.trimmingCharacters(in: .whitespacesAndNewlines))
+        case .server where resume:
+            guard let mac = s.mac, let packet = WakeOnLAN.packet(mac) else {
+                return "Apex hasn’t learned \(s.name)’s network card yet (it’s read while the server is on), so it can’t wake it."
+            }
+            return WakeOnLAN.send(packet) ? nil : "This Mac couldn’t send the wake-up message on the network."
+        case .server:
+            let r = ServerClient.action(s, shutDownCommand)
+            // The connection may close as the server goes down: that's it working.
+            if r.status == 0 || r.stderr.lowercased().contains("closed") { return nil }
+            if r.stderr.contains("password") || r.stderr.contains("sudo") {
+                return "\(s.name) needs a password to shut down. Allow it for this user without one (sudo), or use Apex Server Edition there."
+            }
+            return r.stderr.isEmpty ? "\(s.name) didn’t shut down." : r.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+    }
+
+    /// The network card to wake: the first real one with an address. Pure: tested.
+    static func pickMAC(_ net: [ServerSnapshot.Net]) -> String? {
+        net.compactMap(\.mac).map { $0.lowercased() }
+            .first { WakeOnLAN.bytes($0) != nil && $0 != "00:00:00:00:00:00" }
+    }
+}
+
+/// The Wake-on-LAN "magic packet": six 0xFF bytes, then the card's address
+/// 16 times, broadcast on UDP port 9. Works on the same network, when the
+/// server's card and firmware have it switched on (most virtual machines don't).
+enum WakeOnLAN {
+    static func bytes(_ mac: String) -> [UInt8]? {
+        let parts = mac.split(whereSeparator: { $0 == ":" || $0 == "-" })
+        guard parts.count == 6 else { return nil }
+        let b = parts.compactMap { UInt8($0, radix: 16) }
+        return b.count == 6 ? b : nil
+    }
+
+    static func packet(_ mac: String) -> [UInt8]? {
+        guard let b = bytes(mac) else { return nil }
+        return [UInt8](repeating: 0xFF, count: 6) + Array([[UInt8]](repeating: b, count: 16).joined())
+    }
+
+    static func send(_ packet: [UInt8]) -> Bool {
+        let fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+        var on: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &on, socklen_t(MemoryLayout<Int32>.size))
+        var sent = false
+        for port in [UInt16(9), 7] {
+            var addr = sockaddr_in()
+            addr.sin_family = sa_family_t(AF_INET)
+            addr.sin_port = port.bigEndian
+            addr.sin_addr.s_addr = INADDR_BROADCAST
+            let n = withUnsafePointer(to: &addr) { p in
+                p.withMemoryRebound(to: sockaddr.self, capacity: 1) { sendto(fd, packet, packet.count, 0, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+            }
+            sent = sent || n == packet.count
+        }
+        return sent
+    }
+}
+
+/// Why a server isn't answering, in words: this Mac has no network, isn't
+/// on the server's (private) network, or the server itself is off or down.
+enum ServerReach {
+    enum Status: Equatable { case online, connecting, offline(String), problem(String) }
+
+    /// This Mac's IPv4 addresses with their masks, and whether a VPN is up
+    /// (read at most every 5 seconds: lists ask for every row).
+    static func local() -> (nets: [(UInt32, UInt32)], vpn: Bool) {
+        cache.lock.lock(); defer { cache.lock.unlock() }
+        if let v = cache.value, Date().timeIntervalSince(cache.at) < 5 { return v }
+        let v = readLocal()
+        cache.value = v; cache.at = Date()
+        return v
+    }
+    private final class Cache: @unchecked Sendable {
+        let lock = NSLock(); var value: (nets: [(UInt32, UInt32)], vpn: Bool)?; var at = Date.distantPast
+    }
+    private static let cache = Cache()
+
+    private static func readLocal() -> (nets: [(UInt32, UInt32)], vpn: Bool) {
+        var nets: [(UInt32, UInt32)] = [], vpn = false
+        var head: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&head) == 0, let first = head else { return ([], false) }
+        defer { freeifaddrs(head) }
+        for p in sequence(first: first, next: { $0.pointee.ifa_next }) {
+            let i = p.pointee
+            guard i.ifa_flags & UInt32(IFF_UP) != 0, i.ifa_flags & UInt32(IFF_LOOPBACK) == 0, let a = i.ifa_addr else { continue }
+            let name = String(cString: i.ifa_name)
+            if name.hasPrefix("utun") || name.hasPrefix("ppp") || name.hasPrefix("ipsec") { if a.pointee.sa_family == AF_INET { vpn = true } }
+            guard a.pointee.sa_family == AF_INET, let m = i.ifa_netmask else { continue }
+            let addr = a.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { UInt32(bigEndian: $0.pointee.sin_addr.s_addr) }
+            let mask = m.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { UInt32(bigEndian: $0.pointee.sin_addr.s_addr) }
+            nets.append((addr, mask))
+        }
+        return (nets, vpn)
+    }
+
+    static func ipv4(_ s: String) -> UInt32? {
+        let p = s.split(separator: ".").compactMap { UInt32($0) }
+        guard p.count == 4, p.allSatisfy({ $0 < 256 }) else { return nil }
+        return p[0] << 24 | p[1] << 16 | p[2] << 8 | p[3]
+    }
+
+    static func isPrivate(_ ip: UInt32) -> Bool {
+        ip >> 24 == 10 || ip >> 20 == 0xAC1 || ip >> 16 == 0xC0A8 || ip >> 22 == 0x191   // 10/8, 172.16/12, 192.168/16, 100.64/10
+    }
+
+    /// The reason for "unreachable". Pure: tested.
+    static func reason(host: String, name: String, nets: [(UInt32, UInt32)], vpn: Bool) -> String {
+        if nets.isEmpty { return "This Mac isn’t connected to a network." }
+        if let ip = ipv4(host), isPrivate(ip), !nets.contains(where: { ip & $1 == $0 & $1 }), !vpn {
+            return "Not on \(name)’s network: \(host) is a local address and this Mac is on another network. Connect to that network (or its VPN)."
+        }
+        return "\(name) isn’t answering: it may be off, restarting or its network down."
     }
 }

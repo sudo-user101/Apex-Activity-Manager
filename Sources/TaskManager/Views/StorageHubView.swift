@@ -1,24 +1,32 @@
+import QuickLook
 import SwiftUI
 
-/// Storage hub: pick Optimize, Analyze or Clean first.
+/// Storage hub: pick Optimize, Analyze, Clean or Diagnose first.
 struct CleanupSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
-    enum Mode { case home, optimize, analyze, clean }
-    // Test switch: APEX_OPEN=clean opens straight on Clean.
-    @State private var mode: Mode = ProcessInfo.processInfo.environment["APEX_OPEN"] == "clean" ? .clean : .home
+    enum Mode { case home, optimize, analyze, clean, diagnose }
+    // Test switch: APEX_OPEN=clean / diagnose opens straight on Clean / Diagnose.
+    @State private var mode: Mode = {
+        switch ProcessInfo.processInfo.environment["APEX_OPEN"] {
+        case "clean": return .clean
+        case "diagnose": return .diagnose
+        default: return .home
+        }
+    }()
 
     var body: some View {
         Group {
             switch mode {
             case .home:
-                if let v = model.storageVolume { DriveStorageView(volumePath: v, onAnalyze: { mode = .analyze }, onDone: { dismiss() }) }
+                if let v = model.storageVolume { DriveStorageView(volumePath: v, onAnalyze: { mode = .analyze }, onDiagnose: { mode = .diagnose }, onDone: { dismiss() }) }
                 else { home }
             case .optimize: OptimizeView(onBack: { mode = .home }, onDone: { dismiss() })
             case .analyze: AnalyzeView(onBack: { mode = .home }, onDone: { dismiss() }, startAt: model.storageVolume.map {
                 DiskEntry(name: ($0 as NSString).lastPathComponent, path: $0, isDirectory: true)
             })
             case .clean: CleanView(onBack: { mode = .home }, onDone: { dismiss() })
+            case .diagnose: StorageDiagnoseView(startAt: model.storageVolume, onBack: { mode = .home }, onDone: { dismiss() })
             }
         }
         .padding(22)
@@ -38,6 +46,7 @@ struct CleanupSheet: View {
                 tile("Optimize", "gauge.with.dots.needle.67percent", "Check what slows your Mac and refresh caches and services.") { mode = .optimize }
                 tile("Analyze", "chart.pie", "See what uses your disk, folder by folder, and remove big things you don’t need.") { mode = .analyze }
                 tile("Clean", "sparkles", "Remove caches, logs, leftovers and other junk, sorted into categories.") { mode = .clean }
+                tile("Diagnose", "stethoscope", "Check a drive’s health, or run checks yourself: First Aid, speed, surface scan, errors.") { mode = .diagnose }
             }
             HStack { Spacer(); Button("Done") { dismiss() }.keyboardShortcut(.cancelAction) }
         }
@@ -169,9 +178,15 @@ struct AnalyzeView: View {
     @State private var stack: [DiskEntry] = []              // breadcrumbs (empty = overview)
     @State private var entries: [DiskEntry] = []
     @State private var sizes: [String: (UInt64, Bool)] = [:] // cache across navigation
+    /// In cloud folders: where each item is (only online, on this Mac, partly, syncing).
+    @State private var cloud: [String: CloudAnalyze.Status] = [:]
+    @State private var listing = false
+    /// Quick Look on a file (click it, or its eye button).
+    @State private var preview: URL?
     @State private var generation = 0
     @State private var toTrash: DiskEntry?
     @State private var removeApp: DiskEntry?
+    @State private var compress: DiskEntry?
     @State private var message: String?
 
     private var protectedRoots: Set<String> {
@@ -205,6 +220,20 @@ struct AnalyzeView: View {
                 else { Text("\(Fmt.diskBytes(total)) in \(entries.count) items").font(.caption).foregroundStyle(.secondary).monospacedDigit() }
             }
             if let message { Label(message, systemImage: "info.circle").font(.callout).foregroundStyle(.secondary) }
+            if listing {
+                HStack(spacing: 6) { ProgressView().controlSize(.small); Text("Listing…").foregroundStyle(.secondary) }
+            }
+            if let here = stack.last?.path, CloudAnalyze.isCloud(here) || shown.contains(where: { cloud[$0.path] != nil }) {
+                HStack(spacing: 14) {
+                    Label("Only online", systemImage: "icloud").foregroundStyle(.blue)
+                    Label("On this Mac", systemImage: "laptopcomputer")
+                    Label("Partly", systemImage: "icloud.and.arrow.down").foregroundStyle(.teal)
+                    Label("Syncing", systemImage: "arrow.triangle.2.circlepath.icloud").foregroundStyle(.orange)
+                    Spacer()
+                    Text("Sizes include what’s only online").foregroundStyle(.tertiary)
+                }
+                .font(.caption).foregroundStyle(.secondary)
+            }
             ScrollView {
                 VStack(spacing: 2) {
                     ForEach(shown) { e in row(e, total: total) }
@@ -216,14 +245,26 @@ struct AnalyzeView: View {
             }
             .frame(minHeight: 380, maxHeight: 460)
             HStack {
-                Text("Sizes are space used on disk. Moving to Trash can be undone until you empty it.").font(.caption).foregroundStyle(.tertiary)
+                Text((stack.last.map { CloudAnalyze.isCloud($0.path) } ?? false)
+                     ? "Sizes include what’s only online. Click a file to look at it (one that’s only online downloads to show). Moving to Trash can be undone until you empty it."
+                     : "Sizes are space used on disk. Click a file to look at it. Moving to Trash can be undone until you empty it.")
+                    .font(.caption).foregroundStyle(.tertiary)
                 Spacer()
                 Button("Done") { onDone() }
             }
         }
         .onAppear { if let s = startAt, stack.isEmpty { stack = [s] }; load() }
+        .quickLookPreview($preview)
         .sheet(item: $removeApp) { e in
             AppRemovalSheet(path: e.path) { msg in
+                message = msg
+                sizes[e.path] = nil
+                for s in stack { sizes[s.path] = nil }
+                load()
+            }
+        }
+        .sheet(item: $compress) { e in
+            CompressInPlaceSheet(path: e.path) { msg in
                 message = msg
                 sizes[e.path] = nil
                 for s in stack { sizes[s.path] = nil }
@@ -240,11 +281,19 @@ struct AnalyzeView: View {
     private func row(_ e: DiskEntry, total: UInt64) -> some View {
         let fraction = Double(e.size ?? 0) / Double(total)
         return HStack(spacing: 10) {
-            Image(systemName: e.isDirectory ? "folder.fill" : "doc.fill").foregroundStyle(e.isDirectory ? Color.accentColor : .secondary).frame(width: 18)
+            if e.path == DiskAnalyzer.oldDownloadsKey {
+                Image(systemName: "clock.arrow.circlepath").foregroundStyle(Color.accentColor).frame(width: 28, height: 28)
+            } else {
+                FileThumbnail(path: e.path, size: 28)
+            }
             VStack(alignment: .leading, spacing: 3) {
                 HStack {
                     Text(e.name).lineLimit(1).truncationMode(.middle)
+                    if let c = cloud[e.path] { CloudPlaceBadge(status: c) }
                     if !e.note.isEmpty { Text(e.note).font(.caption2).foregroundStyle(.secondary) }
+                    if let c = cloud[e.path], c.place == .partly {
+                        Text("\(Fmt.diskBytes(c.onMac)) on this Mac").font(.caption2).foregroundStyle(.secondary)
+                    }
                 }
                 GeometryReader { g in
                     Capsule().fill(Color.primary.opacity(0.08))
@@ -254,10 +303,21 @@ struct AnalyzeView: View {
             }
             Text(e.size == nil ? "…" : Fmt.diskBytes(e.size!) + (e.partial ? "+" : ""))
                 .monospacedDigit().frame(width: 90, alignment: .trailing).foregroundStyle(e.size == nil ? .secondary : .primary)
-                .help(e.partial ? "Some contents couldn’t be read, so the real size is larger" : "")
+                .help(cloud[e.path].map { $0.unlisted > 0 ? "\($0.unlisted) folder\($0.unlisted == 1 ? "" : "s") only online didn’t list in time (the server), so the real size is larger" : "Everything, online-only files included" }
+                      ?? (e.partial ? "Some contents couldn’t be read, so the real size is larger" : ""))
             Text(String(format: "%.1f%%", fraction * 100)).font(.caption).monospacedDigit().foregroundStyle(.secondary).frame(width: 48, alignment: .trailing)
+            if !e.isDirectory {
+                Button { preview = URL(fileURLWithPath: e.path) } label: { Image(systemName: "eye") }
+                    .buttonStyle(.borderless)
+                    .help(cloud[e.path]?.place == .online ? "Quick Look (it downloads this file to show it)" : "Quick Look")
+                Button { NSWorkspace.shared.open(URL(fileURLWithPath: e.path)) } label: { Image(systemName: "arrow.up.forward.app") }
+                    .buttonStyle(.borderless).help("Open")
+            }
             Button { ProcessActions.reveal(path: e.path) } label: { Image(systemName: "magnifyingglass") }
                 .buttonStyle(.borderless).help("Show in Finder").disabled(e.path == DiskAnalyzer.oldDownloadsKey)
+            Button { compress = e } label: { Image(systemName: "arrow.down.right.and.arrow.up.left") }
+                .buttonStyle(.borderless).help("Compress photos, videos and PDFs here in place (asks first)")
+                .disabled(stack.isEmpty || e.path.hasSuffix(".app") || (!e.isDirectory && InPlaceCompressor.kind(of: URL(fileURLWithPath: e.path)) == nil))
             Button { if e.path.hasSuffix(".app") { removeApp = e } else { toTrash = e } } label: { Image(systemName: "trash") }
                 .buttonStyle(.borderless).help(e.path.hasSuffix(".app") ? "Remove this app (app only, or with its files)" : "Move to Trash")
                 .disabled(protectedRoots.contains(e.path) || e.path.hasPrefix("/System") || stack.isEmpty)
@@ -265,7 +325,10 @@ struct AnalyzeView: View {
         .padding(.horizontal, 8).padding(.vertical, 6)
         .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 6))
         .contentShape(Rectangle())
-        .onTapGesture { if e.isDirectory { stack.append(e); load() } }
+        .onTapGesture {
+            if e.isDirectory { stack.append(e); load() }
+            else if e.path != DiskAnalyzer.oldDownloadsKey { preview = URL(fileURLWithPath: e.path) }
+        }
     }
 
     private func load() {
@@ -273,21 +336,54 @@ struct AnalyzeView: View {
         let gen = generation
         message = nil
         let path = stack.last?.path
-        let list = path.map(DiskAnalyzer.children(of:)) ?? DiskAnalyzer.roots()
-        entries = list
-        let todo = list.filter { sizes[$0.path] == nil }.map(\.path)
+        entries = []
+        listing = true
+        // Listed off the main thread: a folder that's only online asks the server.
         Task.detached(priority: .userInitiated) {
-            await withTaskGroup(of: (String, UInt64, Bool).self) { group in
-                var it = todo.makeIterator()
+            let list = path.map(DiskAnalyzer.children(of:)) ?? DiskAnalyzer.roots()
+            let todo = await MainActor.run { () -> [String] in
+                guard gen == generation else { return [] }
+                entries = list
+                listing = false
+                if let path, list.isEmpty, Dataless.folder(path) { message = "This folder is only online, and the server didn’t list it in time. Try again when it’s reachable." }
+                return list.filter { sizes[$0.path] == nil }.map(\.path)
+            }
+            typealias Measured = (String, UInt64, Bool, CloudAnalyze.Status?)
+            // In a cloud folder, everything counts (online-only too), with where it is.
+            @Sendable func measure(_ p: String) -> Measured {
+                if CloudAnalyze.isCloud(p) { let c = CloudAnalyze.measure(p); return (p, c.total, c.unlisted > 0, c) }
+                let (s, part) = DiskAnalyzer.measure(p); return (p, s, part, nil)
+            }
+            // Files first, all in one go (cheap: their details only), shown every few hundred;
+            // then folders, a few at a time (they're walked).
+            let isDir = Dictionary(uniqueKeysWithValues: await MainActor.run { entries.map { ($0.path, $0.isDirectory) } })
+            let files = todo.filter { isDir[$0] == false }
+            var batch: [Measured] = []
+            for (i, p) in files.enumerated() {
+                batch.append(measure(p))
+                if batch.count == 400 || i == files.count - 1 {
+                    let done = batch
+                    batch = []
+                    let still = await MainActor.run { () -> Bool in
+                        for (p, s, part, c) in done { sizes[p] = (s, part); if let c { cloud[p] = c } }
+                        return gen == generation
+                    }
+                    if !still { return }
+                }
+            }
+            let folders = todo.filter { isDir[$0] != false }
+            await withTaskGroup(of: Measured.self) { group in
+                var it = folders.makeIterator()
                 func next() -> String? { it.next() }
-                for _ in 0..<4 { if let p = next() { group.addTask { let (s, part) = DiskAnalyzer.measure(p); return (p, s, part) } } }
-                while let (p, s, part) = await group.next() {
+                for _ in 0..<4 { if let p = next() { group.addTask { measure(p) } } }
+                while let (p, s, part, c) = await group.next() {
                     let still = await MainActor.run { () -> Bool in
                         sizes[p] = (s, part)
+                        if let c { cloud[p] = c }
                         return gen == generation
                     }
                     if !still { group.cancelAll(); break }
-                    if let n = next() { group.addTask { let (s, part) = DiskAnalyzer.measure(n); return (n, s, part) } }
+                    if let n = next() { group.addTask { measure(n) } }
                 }
             }
         }
@@ -295,16 +391,18 @@ struct AnalyzeView: View {
 
     private func trash() {
         guard let e = toTrash else { return }
-        do {
-            try FileManager.default.trashItem(at: URL(fileURLWithPath: e.path), resultingItemURL: nil)
-            message = "Moved “\(e.name)” to the Trash."
-            sizes[e.path] = nil
-            for s in stack { sizes[s.path] = nil }       // parents shrink
-            load()
-        } catch {
-            message = "Couldn’t move “\(e.name)”: \(error.localizedDescription)"
-        }
         toTrash = nil
+        Task {
+            // Apps in it are quit first (nothing left running or in the menu bar);
+            // items owned by the system or another user, with your password.
+            let r = await SafeTrash.move([e.path])
+            message = r.message
+            if !r.moved.isEmpty {
+                sizes[e.path] = nil
+                for s in stack { sizes[s.path] = nil }       // parents shrink
+                load()
+            }
+        }
     }
 }
 
@@ -317,6 +415,7 @@ struct DriveStorageView: View {
     @Environment(AppModel.self) private var model
     let volumePath: String
     var onAnalyze: () -> Void
+    var onDiagnose: () -> Void = {}
     var onDone: () -> Void
     @State private var scan: DriveCleaner.Scan?
     @State private var showHelpers = false
@@ -351,6 +450,23 @@ struct DriveStorageView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Analyze this drive").font(.headline)
                         Text("See what takes the space, folder by folder, largest first. You choose what to move to the Trash.")
+                            .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.right").foregroundStyle(.tertiary)
+                }
+                .padding(14).contentShape(Rectangle())
+                .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
+            }
+            .buttonStyle(.plain)
+            .disabled(v == nil)
+
+            Button(action: onDiagnose) {
+                HStack(spacing: 12) {
+                    Image(systemName: "stethoscope").font(.system(size: 26)).foregroundStyle(.tint)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Diagnose this drive").font(.headline)
+                        Text("Drive Doctor’s findings, or checks you run yourself: First Aid, speed, surface scan, errors in the log.")
                             .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     }
                     Spacer()
@@ -438,5 +554,22 @@ struct DriveStorageView: View {
             working = false
             await rescan()
         }
+    }
+}
+
+
+/// Where a cloud item is: only online, on this Mac, partly, or still syncing.
+struct CloudPlaceBadge: View {
+    let status: CloudAnalyze.Status
+    var body: some View {
+        let (symbol, color, text): (String, Color, String) = {
+            switch status.place {
+            case .online: return ("icloud", .blue, "Only online: in the cloud, not stored on this Mac")
+            case .onMac: return ("laptopcomputer", .secondary, "On this Mac (and in the cloud)")
+            case .partly: return ("icloud.and.arrow.down", .teal, "Partly on this Mac: \(Fmt.diskBytes(status.onMac)) of \(Fmt.diskBytes(status.total)); the rest only online")
+            case .syncing: return ("arrow.triangle.2.circlepath.icloud", .orange, "Still syncing: \(status.syncing) file\(status.syncing == 1 ? "" : "s") not uploaded yet")
+            }
+        }()
+        Image(systemName: symbol).font(.caption).foregroundStyle(color).help(text)
     }
 }

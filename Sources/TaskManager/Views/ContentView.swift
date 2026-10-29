@@ -24,7 +24,7 @@ struct ContentView: View {
                     case .startup: StartupView()
                     case .users: UsersView()
                     case .services: ServicesView()
-                    case .report: EmptyView()   // servers only
+                    case .report, .sites, .docker: EmptyView()   // servers only
                     }
                 }
             }
@@ -58,7 +58,9 @@ struct ContentView: View {
             // Test switch: APEX_OPEN=assistant opens the Assistant window.
             if ["assistant", "assistantkeys"].contains(ProcessInfo.processInfo.environment["APEX_OPEN"] ?? "") { openWindow(id: "assistant") }
             // First launch (or APEX_OPEN=welcome): the welcome flow.
-            if !UserDefaults.standard.bool(forKey: "onboarded") || ProcessInfo.processInfo.environment["APEX_OPEN"] == "welcome" {
+            // Also once after an update that changes it (OnboardingView.version).
+            if !UserDefaults.standard.bool(forKey: "onboarded") || UserDefaults.standard.integer(forKey: OnboardingView.versionKey) < OnboardingView.version
+                || ProcessInfo.processInfo.environment["APEX_OPEN"] == "welcome" {
                 try? await Task.sleep(for: .milliseconds(600))
                 model.showWelcome = true
             }

@@ -128,10 +128,12 @@ enum AppRemover {
 
     /// Moves the app (and the given leftovers) to the Trash. Returns what
     /// couldn't be moved.
-    static func remove(appPath: String, leftovers: [Leftover]) -> [String] {
+    /// The app itself goes through `SafeTrash` first (quit, administrator
+    /// fallback); pass nil here then.
+    static func remove(appPath: String?, leftovers: [Leftover]) -> [String] {
         var failed: [String] = []
-        // Files in your home folder (and the app): to the Trash.
-        for p in [appPath] + leftovers.filter({ $0.isFile && !$0.needsAdmin }).map(\.path) {
+        // Files in your home folder (and the app, if given): to the Trash.
+        for p in (appPath.map { [$0] } ?? []) + leftovers.filter({ $0.isFile && !$0.needsAdmin }).map(\.path) {
             do { try FileManager.default.trashItem(at: URL(fileURLWithPath: p), resultingItemURL: nil) }
             catch { failed.append((p as NSString).lastPathComponent) }
         }
@@ -168,7 +170,9 @@ enum AppRemover {
                 lines.append("/bin/launchctl bootout system \(Shell.quote(l.path)) >/dev/null 2>&1")
             }
             let name = (l.path as NSString).lastPathComponent
-            lines.append("/bin/mv -f \(Shell.quote(l.path)) \(Shell.quote(trash + "/" + name + " " + stamp))")
+            let dest = trash + "/" + name + " " + stamp
+            // Made the user's own, so emptying the Trash needs no password.
+            lines.append("/bin/mv -f \(Shell.quote(l.path)) \(Shell.quote(dest)) && /usr/sbin/chown -R \(Shell.quote(NSUserName())) \(Shell.quote(dest))")
         }
         return lines.joined(separator: "; ")
     }

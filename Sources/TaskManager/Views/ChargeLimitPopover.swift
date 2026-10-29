@@ -26,7 +26,8 @@ struct ChargeLimitPopover: View {
 
     /// Everything charge control needs, in the order the user grants it.
     private var ready: Bool {
-        control.installed && control.helperUpToDate && control.settingsWritable && control.helperRunning
+        // An older helper still runs the limit: it doesn't block the controls (see `updateNote`).
+        control.installed && control.settingsWritable && control.helperRunning
             && control.status?.chargeMethod != nil
     }
 
@@ -37,7 +38,7 @@ struct ChargeLimitPopover: View {
                 Spacer()
                 if let l = control.chargeLimit { Text("\(l)%").monospacedDigit().foregroundStyle(.green) }
             }
-            if ready { controls } else { setup }
+            if ready { updateNote; controls } else { setup }
             if let e = control.lastError { Text(e).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true) }
         }
         .padding(14)
@@ -59,8 +60,6 @@ struct ChargeLimitPopover: View {
             step(done: control.installed, "Administrator approval",
                  "Installs a small helper. macOS asks for your password once.")
             if control.installed {
-                step(done: control.helperUpToDate, "Helper up to date",
-                     "The installed helper is older than this version of Apex.")
                 step(done: control.settingsWritable, "Settings access",
                      "Apex can’t write the helper’s settings file.")
                 step(done: control.helperRunning, "Allowed in the background",
@@ -75,8 +74,8 @@ struct ChargeLimitPopover: View {
             if !control.installed {
                 Button(working ? "Waiting for approval…" : "Allow…") { run { await control.install() } }
                     .keyboardShortcut(.defaultAction)
-            } else if !control.helperUpToDate || !control.settingsWritable {
-                Button(working ? "Waiting for approval…" : (control.helperUpToDate ? "Repair…" : "Update Helper…")) {
+            } else if !control.settingsWritable {
+                Button(working ? "Waiting for approval…" : "Repair…") {
                     run { await control.install() }
                 }
                 .keyboardShortcut(.defaultAction)
@@ -90,6 +89,21 @@ struct ChargeLimitPopover: View {
             if control.installed { removeButton }
         }
         .disabled(working)
+    }
+
+    /// Only when the helper itself changed (rare): it keeps working meanwhile.
+    @ViewBuilder private var updateNote: some View {
+        if !control.helperUpToDate {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "arrow.down.circle").foregroundStyle(.tint)
+                Text((["An updated helper is available."] + FanControl.helperNewsSince(control.status?.helperVersion)
+                      + ["The limit keeps working until you update."]).joined(separator: " "))
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Button(working ? "Updating…" : "Update…") { run { await control.install() } }.controlSize(.small).disabled(working)
+            }
+            .padding(8)
+            .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
+        }
     }
 
     /// Just installed: give the helper a few seconds to report in before calling it blocked.
@@ -137,7 +151,7 @@ struct ChargeLimitPopover: View {
         Divider()
         ChargeSchedulesSection()
         statusLine
-        Text("The limit and schedules keep working when Apex is closed. While your Mac sleeps it charges normally.")
+        Text("The limit and schedules keep working when Apex is closed. At the limit the power adapter powers your Mac and the battery rests; it stays paused while the Mac sleeps, and is left paused when it shuts down (whether a switched-off Mac keeps that depends on its firmware: Apex tells you after a restart).")
             .font(.caption).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
         HStack { Spacer(); removeButton }
     }
@@ -159,10 +173,14 @@ struct ChargeLimitPopover: View {
                 Label(m, systemImage: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(.orange)
             } else if control.chargeLimit == nil {
                 Label("Charging normally", systemImage: "bolt.circle").font(.caption).foregroundStyle(.secondary)
+            } else if s.limitNotHeld == true {
+                Label("Not holding the limit: the power adapter keeps powering your Mac", systemImage: "powerplug.fill")
+                    .font(.caption).foregroundStyle(.orange)
             } else if s.chargingBlocked {
                 Label(s.chargeMethod == "hold"
                       ? "Holding at the limit: running on battery while plugged in"
-                      : "Charging paused at the limit", systemImage: "pause.circle.fill")
+                      : "Charging paused at \(s.batteryPercent.map { "\($0)%" } ?? "the limit") · the power adapter powers your Mac",
+                      systemImage: s.chargeMethod == "hold" ? "battery.75percent" : "powerplug.fill")
                     .font(.caption).foregroundStyle(.green)
             } else if let p = s.batteryPercent, let l = control.chargeLimit, p < l {
                 Label("Charging to \(l)% (now \(p)%)", systemImage: "bolt.circle").font(.caption).foregroundStyle(.secondary)
@@ -170,8 +188,24 @@ struct ChargeLimitPopover: View {
                 Label("Applying the limit…", systemImage: "hourglass")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            if s.batteryPowering == true, s.chargeMethod != "hold" || !control.holdOnBattery {
+                Label("Plugged in, but the battery is powering your Mac. The adapter may be too weak for what’s running, or it isn’t delivering power (try another cable or port).",
+                      systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+            }
+            if s.adapterRestored == true {
+                Text("Something had disconnected the power adapter (another battery app?). Apex connected it again so it powers your Mac.")
+                    .font(.caption2).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            if let off = s.whileOff {
+                Label(off, systemImage: "power").font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
             if s.chargeMethod == "hold" {
-                Text("This Mac’s firmware can only disconnect the charger, so the battery drifts down 3% before it reconnects.")
+                Toggle("Hold the limit by running on battery", isOn: Binding(get: { control.holdOnBattery }, set: { control.setHoldOnBattery($0) }))
+                    .toggleStyle(.switch).controlSize(.small)
+                Text(control.holdOnBattery
+                     ? "This Mac’s firmware can only stop charging by disconnecting the adapter, so at the limit your apps run on battery and it drifts down 3% before the adapter reconnects."
+                     : "Off: the power adapter always powers your Mac. This Mac’s firmware can only stop charging by disconnecting the adapter, so the limit isn’t held while plugged in.")
                     .font(.caption2).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
             }
         }

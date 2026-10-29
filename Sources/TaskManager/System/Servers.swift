@@ -15,11 +15,23 @@ struct ServerConfig: Identifiable, Codable, Hashable, Sendable {
     var edition: Bool? = nil
     /// The Server Edition's certificate, as paired (SHA-256).
     var fingerprint: String? = nil
+    /// The Server Edition's key (SHA-256 of its public key): the same through
+    /// its certificate renewals.
+    var keyPin: String? = nil
+    /// The server's network card, learned from its readings, for Wake-on-LAN.
+    var mac: String? = nil
 
     var isEdition: Bool { edition == true }
 
     /// `user@host` (or just the host).
     var target: String { user.isEmpty ? host : "\(user)@\(host)" }
+
+    /// A host and user ssh can't mistake for options or split in two (no
+    /// leading "-", no spaces or control characters). Pure: tested.
+    static func isSafe(_ field: String) -> Bool {
+        !field.hasPrefix("-") && !field.contains { $0.isWhitespace || $0.asciiValue.map { $0 < 32 || $0 == 127 } ?? false }
+    }
+    var isSafe: Bool { Self.isSafe(host) && Self.isSafe(user) }
 
     /// A Docker container on this Mac (no host): read with `docker`, not SSH.
     var isLocal: Bool { host.isEmpty }
@@ -51,6 +63,7 @@ struct ServerSnapshot: Decodable, Sendable {
     struct Net: Decodable, Sendable, Identifiable {
         var id: String { name }
         var name: String; var inPerSec: Double; var outPerSec: Double; var received: Int64?; var sent: Int64?
+        var mac: String?
     }
     struct Process: Decodable, Sendable, Identifiable {
         var id: Int { pid }
@@ -87,6 +100,30 @@ struct ServerSnapshot: Decodable, Sendable {
     var sessions: [Session]?
     var webServers: [String]?
     var connections: Int?
+    var webTraffic: WebTraffic?
+
+    /// The end of the web server's access log, summed by the agent over the
+    /// last 10 minutes (`window` seconds actually covered).
+    struct WebTraffic: Decodable, Sendable {
+        struct Count: Decodable, Sendable, Hashable { var path: String?; var ip: String?; var what: String?; var count: Int }
+        struct Scanner: Decodable, Sendable, Hashable { var ip: String; var requests: Int; var notFound: Int; var probes: Int }
+        var log: String?
+        var readable: Bool?
+        var requests: Int
+        var window: Double
+        var perMinute: Double?
+        var statuses: [String: Int]?
+        var bytes: Int64?
+        var bots: Int?
+        var topPaths: [Count]?
+        var topClients: [Count]?
+        var errors: [Count]?
+        var scanners: [Scanner]?
+
+        var serverErrors: Int { statuses?["5xx"] ?? 0 }
+        /// Share of requests that failed on the server (5xx), 0–1.
+        var errorShare: Double { requests > 0 ? Double(serverErrors) / Double(requests) : 0 }
+    }
 }
 
 /// Talks to a server over SSH. One connection is kept open (SSH's own
@@ -106,7 +143,7 @@ enum ServerClient {
     /// The ssh options for one command: no password prompts (keys only), short
     /// timeouts, and the shared connection when one is open (`ControlMaster=no`:
     /// a command never starts it, see `openShared`). Pure: tested.
-    static func sshArguments(_ s: ServerConfig, socketDir: String) -> [String] {
+    static func sshArguments(_ s: ServerConfig, socketDir: String?) -> [String] {
         ["-o", "ControlMaster=no"] + connectionArguments(s, socketDir: socketDir)
     }
 
@@ -115,7 +152,7 @@ enum ServerClient {
     /// command with `ControlMaster=auto`, the background connection keeps that
     /// command's output open, and reading it waits until the connection ends.
     static func openShared(_ s: ServerConfig) {
-        let dir = socketDir
+        guard let dir = socketDir else { return }
         if run(["-O", "check"] + connectionArguments(s, socketDir: dir)) == 0 { return }
         _ = run(["-o", "ControlMaster=yes", "-o", "ControlPersist=60", "-f", "-N"] + connectionArguments(s, socketDir: dir))
     }
@@ -131,11 +168,13 @@ enum ServerClient {
         return p.terminationStatus
     }
 
-    static func connectionArguments(_ s: ServerConfig, socketDir: String) -> [String] {
+    /// `socketDir` nil = no shared connection (each reading connects on its own).
+    static func connectionArguments(_ s: ServerConfig, socketDir: String?) -> [String] {
         var a = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-o", "ServerAliveInterval=15",
-                 "-o", "ControlPath=\(socketDir)/%C", "-o", "StrictHostKeyChecking=accept-new"]
+                 "-o", "ControlPath=" + (socketDir.map { $0 + "/%C" } ?? "none"), "-o", "StrictHostKeyChecking=accept-new"]
         if s.port != 22 { a += ["-p", String(s.port)] }
-        a.append(s.target)
+        // "--" ends ssh's options: a host can never be read as one (e.g. "-oProxyCommand=…").
+        a += ["--", s.isSafe ? s.target : "invalid-host.invalid"]
         return a
     }
 
@@ -147,11 +186,28 @@ enum ServerClient {
             : "docker exec -i \(Shell.quote(s.container)) python3 - "
     }
 
-    static var socketDir: String {
-        let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("Apex/ssh").path
-        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    /// Where the shared connection's socket lives. Short on purpose: a Unix
+    /// socket path is at most 104 bytes on macOS and ssh adds a 40-character
+    /// name and a 17-character temporary suffix, so ~/Library/Caches/… broke
+    /// every reading for user names over 14 characters ("ControlPath too
+    /// long", exit 255). /tmp is shared, so the folder must be this user's
+    /// own and closed to others; otherwise nil (no shared connection).
+    static var socketDir: String? {
+        let dir = "/tmp/apex-ssh-\(getuid())"
+        _ = mkdir(dir, 0o700)
+        var st = stat()
+        guard lstat(dir, &st) == 0, isSafeSocketDir(owner: st.st_uid, mode: st.st_mode, uid: getuid()),
+              controlPathFits(dir) else { return nil }
         return dir
     }
+
+    /// The user's own real folder, nobody else can read or write it. Pure: tested.
+    static func isSafeSocketDir(owner: uid_t, mode: mode_t, uid: uid_t) -> Bool {
+        owner == uid && (mode & S_IFMT) == S_IFDIR && (mode & 0o077) == 0
+    }
+
+    /// The socket path ssh makes in `dir` (with its temporary suffix) fits macOS's 104 bytes. Pure: tested.
+    static func controlPathFits(_ dir: String) -> Bool { dir.utf8.count + 1 + 40 + 17 < 104 }
 
     /// One reading. Blocking (~1–2 s: the agent measures over a second).
     static func snapshot(_ s: ServerConfig) -> Result<ServerSnapshot, ServerError> {
@@ -268,7 +324,37 @@ enum ServerInsights {
         if let web = s.webServers, !web.isEmpty, let c = s.connections {
             out.append(.init(level: .info, title: "Web server: " + web.joined(separator: ", "), detail: "\(c) open connections."))
         }
+        out += webInsights(s.webTraffic)
         return out.sorted { $0.level.rawValue > $1.level.rawValue }
+    }
+
+    /// What the access log says: pages failing, scanners, a log Apex can't read. Pure: tested.
+    static func webInsights(_ w: ServerSnapshot.WebTraffic?) -> [Insight] {
+        guard let w else { return [] }
+        var out: [Insight] = []
+        if w.readable == false {
+            out.append(.init(level: .info, title: "Can’t read the web server’s log",
+                             detail: "\(w.log ?? "The access log") needs more rights. Add your SSH user to the group that owns it (often adm): sudo usermod -aG adm <user>."))
+            return out
+        }
+        if w.requests >= 50, w.errorShare >= 0.05 {
+            let worst = w.errors?.first?.what.map { " Mostly \($0)." } ?? ""
+            out.append(.init(level: w.errorShare >= 0.2 ? .critical : .warning,
+                             title: "\(Int((w.errorShare * 100).rounded()))% of web requests are failing",
+                             detail: "\(w.serverErrors) of \(w.requests) in the last \(minutes(w.window)) ended in a server error (5xx).\(worst) Check the app behind the web server and its error log."))
+        }
+        if let s = w.scanners, !s.isEmpty {
+            out.append(.init(level: .warning, title: "\(s.count) address\(s.count == 1 ? " is" : "es are") probing the site",
+                             detail: s.prefix(3).map { "\($0.ip) (\($0.notFound) not found, \($0.probes) attack paths)" }.joined(separator: ", ")
+                                + ". Usually automated scanners; a firewall rule or fail2ban can block them."))
+        }
+        return out
+    }
+
+    /// "8 minutes". Pure.
+    static func minutes(_ seconds: Double) -> String {
+        let m = max(1, Int((seconds / 60).rounded()))
+        return "\(m) minute\(m == 1 ? "" : "s")"
     }
 
     static func biggest(_ s: ServerSnapshot) -> String {
@@ -283,5 +369,42 @@ enum ServerInsights {
         let secs = now.timeIntervalSince(first.0)
         guard grew > 0 else { return nil }
         return Double(d.free) / (grew / secs) / 86_400
+    }
+}
+
+/// Every saved server added up, for All Servers. CPU is weighted by cores
+/// (a busy 2-core box and an idle 32-core one are 6 %, not 50 %); disks are
+/// counted once per device (bind mounts and containers show the same disk
+/// under several mounts). Pure: tested.
+struct FleetTotals: Equatable {
+    var online = 0, offline = 0
+    var cores = 0
+    var cpu = 0.0
+    var memoryUsed: Int64 = 0, memoryTotal: Int64 = 0
+    var diskUsed: Int64 = 0, diskTotal: Int64 = 0
+    var netIn = 0.0, netOut = 0.0
+    var processes = 0
+    var memoryPercent: Double { memoryTotal > 0 ? Double(memoryUsed) / Double(memoryTotal) * 100 : 0 }
+    var diskPercent: Double { diskTotal > 0 ? Double(diskUsed) / Double(diskTotal) * 100 : 0 }
+
+    static func make(_ snaps: [ServerSnapshot], offline: Int) -> FleetTotals {
+        var t = FleetTotals(online: snaps.count, offline: offline)
+        var busy = 0.0
+        for s in snaps {
+            let c = max(1, s.cpu.cores)
+            t.cores += c
+            busy += s.cpu.total * Double(c)
+            t.memoryUsed += s.memory.used
+            t.memoryTotal += s.memory.total
+            var seen = Set<String>()
+            for d in s.disks where d.total > 0 && seen.insert(d.device).inserted {
+                t.diskUsed += d.used; t.diskTotal += d.total
+            }
+            t.netIn += s.network.reduce(0) { $0 + $1.inPerSec }
+            t.netOut += s.network.reduce(0) { $0 + $1.outPerSec }
+            t.processes += s.processes.count
+        }
+        t.cpu = t.cores > 0 ? busy / Double(t.cores) : 0
+        return t
     }
 }

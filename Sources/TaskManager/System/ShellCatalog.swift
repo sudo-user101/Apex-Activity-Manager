@@ -3,7 +3,7 @@ import Foundation
 /// Ready-made commands for the Shell window, in categories. A command can
 /// have blanks (`{Host}`) the person fills in; what they type is quoted so it
 /// can only ever be that value, never extra commands.
-struct ShellCommand: Identifiable, Hashable, Sendable {
+struct ShellCommand: Identifiable, Hashable, Codable, Sendable {
     var id: String { category + "/" + title }
     let category: String
     let title: String
@@ -114,5 +114,52 @@ enum ShellCatalog {
             return true
         }
         return false
+    }
+}
+
+/// Shell › Custom: commands people add themselves (with `{Name}` blanks like
+/// the ready-made ones), kept in UserDefaults as JSON.
+enum ShellCustom {
+    static let category = "Custom"
+    static let key = "shellCustomCommands"
+
+    static func load(_ d: UserDefaults = .standard) -> [ShellCommand] {
+        guard let data = d.data(forKey: key), let list = try? JSONDecoder().decode([ShellCommand].self, from: data) else { return [] }
+        return list
+    }
+
+    static func save(_ list: [ShellCommand], _ d: UserDefaults = .standard) {
+        if let data = try? JSONEncoder().encode(list) { d.set(data, forKey: key) }
+    }
+
+    /// A tidy command from what was typed in the editor. Asking for the
+    /// password always means asking before running. Pure: tested.
+    static func make(title: String, detail: String, template: String, admin: Bool, changes: Bool) -> ShellCommand {
+        let t = template.trimmingCharacters(in: .whitespacesAndNewlines)
+        let (command, sudo) = ShellCatalog.adminForm(t)
+        let needsAdmin = admin || sudo
+        return ShellCommand(category: category, title: title.trimmingCharacters(in: .whitespaces),
+                            detail: detail.trimmingCharacters(in: .whitespaces), template: command,
+                            needsAdmin: needsAdmin, changes: changes || needsAdmin)
+    }
+
+    /// What's wrong with a command before it's saved, in plain words; nil = fine.
+    /// `replacing`: the title of the command being edited. Pure: tested.
+    static func problem(_ c: ShellCommand, existing: [ShellCommand], replacing: String? = nil) -> String? {
+        if c.title.isEmpty { return "Give it a name." }
+        if c.template.isEmpty { return "Type the command." }
+        if existing.contains(where: { $0.title.caseInsensitiveCompare(c.title) == .orderedSame && $0.title != replacing }) {
+            return "You already have a command called “\(c.title)”."
+        }
+        let opens = c.template.filter { $0 == "{" }.count, closes = c.template.filter { $0 == "}" }.count
+        if opens != closes { return "A blank is missing its { or }. Blanks look like {Host}." }
+        return nil
+    }
+
+    /// Adds, or replaces the one called `replacing`, keeping the order. Pure: tested.
+    static func upsert(_ c: ShellCommand, into list: [ShellCommand], replacing: String?) -> [ShellCommand] {
+        var out = list
+        if let replacing, let i = out.firstIndex(where: { $0.title == replacing }) { out[i] = c } else { out.append(c) }
+        return out
     }
 }

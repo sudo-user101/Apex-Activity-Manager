@@ -38,7 +38,7 @@ enum DiskAnalyzer {
     static func children(of path: String) -> [DiskEntry] {
         let fm = FileManager.default
         if path == oldDownloadsKey { return oldDownloads() }
-        guard let names = try? fm.contentsOfDirectory(atPath: path) else { return [] }
+        guard let names = CloudAnalyze.list(path) else { return [] }        // only-online folders: a few seconds at most
         return names.map { n in
             let full = (path as NSString).appendingPathComponent(n)
             var isDir: ObjCBool = false

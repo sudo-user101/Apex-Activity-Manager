@@ -250,12 +250,47 @@ verification afterwards.
   [Apex Server Edition](https://github.com/sudo-user101/Apex-Activity-Manager-Server-Edition)
   on the server for everything, encrypted, without SSH.
 
+## Servers
+
+All your Linux servers in one place: every server added up, each one like
+this Mac, its websites and its Docker containers. Pair a server with
+[Apex Server Edition](https://github.com/sudo-user101/Apex-Activity-Manager-Server-Edition)
+(one command to install, one code to pair) or connect over SSH.
+
+<p align="center">
+  <img src="docs/images/servers.png" alt="All Servers: CPU, memory, network and disk for every server combined, with live graphs, and a list of servers with one offline shown in red" />
+</p>
+
+- **All Servers:** CPU across every core of every server, memory, network
+  and disk, with a sortable list. A server that's off or out of reach shows
+  red and says why.
+- **Each server, like this Mac:** Performance, Processes, Users, Services
+  and a Report, with ▶ Resume and ■ Stop.
+
+<p align="center">
+  <img src="docs/images/server-performance.png" width="49%" alt="A server's CPU page: graph, each core, load and the busiest processes" />
+  <img src="docs/images/server-processes.png" width="49%" alt="A server's processes with CPU, memory and how long each has run" />
+</p>
+
+- **Sites:** every site on nginx, Caddy, Traefik and Nginx Proxy Manager,
+  where it forwards, when its certificate ends and its traffic. Add, edit
+  and switch sites off; each change is checked by the proxy and undone if
+  it's refused.
+- **Docker Management:** containers by stack and the manager running them
+  (Dockge, Portainer, Compose), logs, updates, compose files, images,
+  volumes and networks.
+
+<p align="center">
+  <img src="docs/images/server-sites.png" width="49%" alt="Sites: four websites with where they forward, certificate days left and traffic, one certificate ending soon" />
+  <img src="docs/images/server-docker.png" width="49%" alt="Docker Management: stacks run by Dockge and Portainer with their containers, ports, CPU and memory" />
+</p>
+
 ## Install
 
 1. Download the latest **.dmg** from
    [Releases](https://github.com/sudo-user101/Apex-Activity-Manager-MacOSX/releases/latest).
 2. Open it and drag **Apex Activity Manager** onto **Applications**.
-3. Version 1.3.0 isn't notarized: the first time, macOS may say it can't check
+3. Version 1.4.0 isn't notarized: the first time, macOS may say it can't check
    the app. Open **System Settings › Privacy & Security** and click
    **Open Anyway**. Releases signed with Developer ID and notarized by Apple
    open normally.

@@ -1,3 +1,4 @@
+import CryptoKit
 import XCTest
 import FanControlCore
 @testable import TaskManager
@@ -220,5 +221,99 @@ final class StayAwakeTests: XCTestCase {
         let json = #"{"heartbeat": 1800000000, "fans": [], "chargeLimit": 80}"#
         XCTAssertNil(FanControl.decode(Data(json.utf8))?.stayAwakeUntil)
         XCTAssertEqual(FanControl.decode(Data(json.utf8))?.chargeLimit, 80)
+    }
+}
+
+/// Issue #18: at the limit the power adapter powers the Mac; what happens at shutdown and while off.
+final class AdapterPowerTests: XCTestCase {
+    func testOnlyPauseStopsChargingUnlessRunningOnBatteryIsAllowed() {
+        XCTAssertTrue(FanControl.mayBlock(method: "pause", holdOnBattery: nil))
+        XCTAssertTrue(FanControl.mayBlock(method: "pause", holdOnBattery: false))
+        XCTAssertFalse(FanControl.mayBlock(method: "hold", holdOnBattery: nil), "hold disconnects the adapter: never by default")
+        XCTAssertFalse(FanControl.mayBlock(method: "hold", holdOnBattery: false))
+        XCTAssertTrue(FanControl.mayBlock(method: "hold", holdOnBattery: true))
+        XCTAssertFalse(FanControl.mayBlock(method: nil, holdOnBattery: true))
+    }
+
+    func testBatteryPoweringWhilePluggedIn() {
+        XCTAssertTrue(FanControl.drainingOnAdapter(externalConnected: true, amperageMA: -900))
+        XCTAssertFalse(FanControl.drainingOnAdapter(externalConnected: true, amperageMA: -40), "a few mA at rest is normal")
+        XCTAssertFalse(FanControl.drainingOnAdapter(externalConnected: true, amperageMA: 1200), "charging")
+        XCTAssertFalse(FanControl.drainingOnAdapter(externalConnected: false, amperageMA: -900), "unplugged: of course it's the battery")
+        XCTAssertFalse(FanControl.drainingOnAdapter(externalConnected: nil, amperageMA: nil))
+    }
+
+    func testAdapterIsReconnectedWhilePaused() {
+        XCTAssertTrue(FanControl.shouldReconnectAdapter(method: "pause", chie: [0x08]))
+        XCTAssertFalse(FanControl.shouldReconnectAdapter(method: "pause", chie: [0x00]))
+        XCTAssertFalse(FanControl.shouldReconnectAdapter(method: "pause", chie: nil), "no CHIE key on this Mac")
+        XCTAssertFalse(FanControl.shouldReconnectAdapter(method: "hold", chie: [0x08]), "hold mode uses CHIE on purpose")
+    }
+
+    func testShutdownLeavesAPausedChargePausedOnlyWhenSafe() {
+        XCTAssertTrue(FanControl.keepPausedOnExit(method: "pause", configPresent: true, blocked: true, limit: 80))
+        XCTAssertFalse(FanControl.keepPausedOnExit(method: "pause", configPresent: false, blocked: true, limit: 80), "helper being removed")
+        XCTAssertFalse(FanControl.keepPausedOnExit(method: "pause", configPresent: true, blocked: false, limit: 80))
+        XCTAssertFalse(FanControl.keepPausedOnExit(method: "pause", configPresent: true, blocked: true, limit: nil))
+        XCTAssertFalse(FanControl.keepPausedOnExit(method: "hold", configPresent: true, blocked: true, limit: 80), "never leave the adapter disconnected")
+    }
+
+    func testWhatHappenedWhileOff() {
+        let r = FanControl.OffRecord(percent: 80, at: Date(), limit: 80, paused: true)
+        let charged = FanControl.whileOffNote(r, nowPercent: 100)
+        XCTAssertTrue(charged?.hasPrefix("While this Mac was off it charged from 80% to 100%, past your 80% limit.") == true)
+        XCTAssertEqual(FanControl.whileOffNote(r, nowPercent: 80), "Stayed at 80% while this Mac was off.")
+        XCTAssertEqual(FanControl.whileOffNote(r, nowPercent: 79), "Stayed at 79% while this Mac was off.")
+        XCTAssertNil(FanControl.whileOffNote(FanControl.OffRecord(percent: 60, at: Date(), limit: 80, paused: false), nowPercent: 75),
+                     "charging up to the limit is fine")
+        XCTAssertNil(FanControl.whileOffNote(FanControl.OffRecord(percent: 80, at: Date(), limit: nil, paused: false), nowPercent: 100), "no limit")
+        XCTAssertNil(FanControl.whileOffNote(nil, nowPercent: 100))
+    }
+
+    func testSettingRoundTripsAndOldFilesStillDecode() throws {
+        let c = FanControl.Config(chargeLimit: 80, holdOnBattery: true)
+        XCTAssertEqual(FanControl.decode(FanControl.encode(c)!)?.holdOnBattery, true)
+        XCTAssertNil(FanControl.decode(FanControl.encode(FanControl.Config(chargeLimit: 80))!)?.holdOnBattery)
+        // A status file from an older helper (none of the new fields).
+        let old = #"{"updated": 1700000000, "fanTargets": {}, "chargeMethod": "pause", "chargingBlocked": true, "batteryPercent": 80}"#
+        let dec = JSONDecoder(); dec.dateDecodingStrategy = .secondsSince1970
+        let s = try dec.decode(FanControl.Status.self, from: Data(old.utf8))
+        XCTAssertNil(s.onAdapter)
+        XCTAssertNil(s.limitNotHeld)
+        XCTAssertNil(s.whileOff)
+    }
+}
+
+/// The helper is updated (with the password) only when `FanControl.helperVersion` goes up.
+final class HelperVersionTests: XCTestCase {
+    /// SHA-256 of the helper's code (Sources/ApexFanHelper + Sources/FanControlCore, files
+    /// in path order) for each helper version. Changed the helper's code? If it behaves
+    /// differently, raise `FanControl.helperVersion` and add a line to `helperNews`; either
+    /// way, put the new hash here (the failure message prints it).
+    static let recorded: [Int: String] = [
+        2: "359cf8865cbaf8419082619b20a84862b7965759227edcf1f7549294e79f3de3",
+    ]
+
+    func testHelperCodeChangesComeWithAVersion() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        var paths: [String] = []
+        for dir in ["Sources/ApexFanHelper", "Sources/FanControlCore"] {
+            let names = try FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent(dir).path)
+            paths += names.filter { $0.hasSuffix(".swift") }.map { dir + "/" + $0 }
+        }
+        var data = Data()
+        for p in paths.sorted() { data += try Data(contentsOf: root.appendingPathComponent(p)) }
+        let hash = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        XCTAssertEqual(Self.recorded[FanControl.helperVersion], hash,
+                       "The helper's code changed. If it behaves differently, raise FanControl.helperVersion (and add to helperNews); then record this hash for that version: \(hash)")
+    }
+
+    func testOnlyAnOlderRunningHelperNeedsUpdating() {
+        XCTAssertTrue(FanControl.helperNeedsUpdate(running: nil, statusKnown: true), "a helper from before versions")
+        XCTAssertTrue(FanControl.helperNeedsUpdate(running: FanControl.helperVersion - 1, statusKnown: true))
+        XCTAssertFalse(FanControl.helperNeedsUpdate(running: FanControl.helperVersion, statusKnown: true), "a new build of Apex alone never asks")
+        XCTAssertFalse(FanControl.helperNeedsUpdate(running: nil, statusKnown: false), "not running yet: can't tell, don't nag")
+        XCTAssertEqual(FanControl.helperNewsSince(FanControl.helperVersion), [])
+        XCTAssertEqual(FanControl.helperNewsSince(nil).count, FanControl.helperVersion - 1, "news for every version")
     }
 }

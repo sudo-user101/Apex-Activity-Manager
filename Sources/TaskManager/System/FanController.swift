@@ -19,6 +19,8 @@ final class FanController {
     private(set) var chargeOverrideUntil: Date?
     private(set) var chargeSchedules: [FanControl.ChargeSchedule] = []
     private(set) var nightCharging: FanControl.NightCharging?
+    /// Firmware that can only "hold" (disconnect the adapter): may the limit run the Mac on battery?
+    private(set) var holdOnBattery = false
     /// Lid-closed mode, renewed by `LidAwake` (nil = off).
     private(set) var stayAwakeUntil: Date?
     /// What the helper actually did (read back from its status file).
@@ -30,6 +32,7 @@ final class FanController {
             chargeOverrideUntil = c.chargeOverrideUntil
             chargeSchedules = c.chargeSchedules ?? []
             nightCharging = c.nightCharging
+            holdOnBattery = c.holdOnBattery ?? false
         }
         refreshStatus()
         // Night charging keeps the battery full until the Mac is opened: tell the helper when that happens.
@@ -41,17 +44,18 @@ final class FanController {
     /// Setup checks shown before charge control is trusted.
     /// Helper status is fresh (it writes every 10 s) → macOS lets it run in the background.
     var helperRunning: Bool { status.map { Date().timeIntervalSince($0.updated) < 30 } ?? false }
-    /// The installed helper is the same build as the one inside this app.
-    private(set) var helperUpToDate = true
+    /// The installed helper is as new as this Apex's (by `FanControl.helperVersion`,
+    /// not by its bytes: every build changes those, and asking for the password
+    /// after every build was the problem).
+    var helperUpToDate: Bool {
+        !FanControl.helperNeedsUpdate(running: status?.helperVersion, statusKnown: helperRunning)
+    }
     /// Apex can write the settings file the helper reads.
     private(set) var settingsWritable = true
 
     func refreshStatus() {
         installed = FileManager.default.fileExists(atPath: FanControl.daemonPlist)
         if installed {
-            let bundled = Bundle.main.url(forAuxiliaryExecutable: "apex-fanhelper").flatMap { FileManager.default.contents(atPath: $0.path) }
-            let current = FileManager.default.contents(atPath: FanControl.helperPath)
-            helperUpToDate = bundled == nil || bundled == current
             settingsWritable = FileManager.default.isWritableFile(atPath: FanControl.configPath)
         }
         guard let d = FileManager.default.contents(atPath: FanControl.statusPath) else { status = nil; return }
@@ -78,6 +82,8 @@ final class FanController {
     func removeSchedule(_ id: UUID) { chargeSchedules.removeAll { $0.id == id }; save() }
 
     func setNightCharging(_ n: FanControl.NightCharging?) { nightCharging = n; save() }
+
+    func setHoldOnBattery(_ on: Bool) { holdOnBattery = on; save() }
 
     @ObservationIgnored private var screenWake: NSObjectProtocol?
     private func markOpened() {
@@ -121,7 +127,7 @@ final class FanController {
         guard installed else { return }
         let cfg = FanControl.Config(heartbeat: Date(), fans: settings, chargeLimit: chargeLimit, chargeOverrideUntil: chargeOverrideUntil,
                                     chargeSchedules: chargeSchedules.isEmpty ? nil : chargeSchedules, nightCharging: nightCharging,
-                                    stayAwakeUntil: stayAwakeUntil)
+                                    stayAwakeUntil: stayAwakeUntil, holdOnBattery: holdOnBattery ? true : nil)
         write(cfg)
         heartbeat?.invalidate()
         heartbeat = nil
@@ -141,7 +147,8 @@ final class FanController {
         stayAwakeUntil = nil
         let cfg = FanControl.Config(heartbeat: Date(), fans: settings.map { var s = $0; s.mode = .auto; return s },
                                     chargeLimit: chargeLimit, chargeOverrideUntil: chargeOverrideUntil,
-                                    chargeSchedules: chargeSchedules.isEmpty ? nil : chargeSchedules, nightCharging: nightCharging)
+                                    chargeSchedules: chargeSchedules.isEmpty ? nil : chargeSchedules, nightCharging: nightCharging,
+                                    holdOnBattery: holdOnBattery ? true : nil)
         write(cfg)
     }
 
@@ -205,9 +212,12 @@ final class FanController {
     func uninstall() async {
         chargeLimit = nil
         restoreAutomatic()
+        // The settings file goes first: a helper that sees it gone hands charging back as it stops
+        // (with it still there, it would leave a paused charge paused, as at shutdown).
         let script = [
+            "rm -f \(Shell.quote(FanControl.configPath))",
             "launchctl bootout system/\(FanControl.daemonLabel) 2>/dev/null; true",
-            "rm -f \(FanControl.daemonPlist) \(FanControl.helperPath) \(Shell.quote(FanControl.configPath)) \(Shell.quote(FanControl.statusPath))",
+            "rm -f \(FanControl.daemonPlist) \(FanControl.helperPath) \(Shell.quote(FanControl.statusPath)) \(Shell.quote(FanControl.offRecordPath))",
         ].joined(separator: " && ")
         let r = await Task.detached {
             Shell.runAsAdmin(script, prompt: "Apex Activity Manager wants to remove its hardware helper. Charging and fans go back to normal.")

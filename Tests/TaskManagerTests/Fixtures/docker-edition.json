@@ -1,0 +1,183 @@
+{
+ "available": true,
+ "version": "29.5.2",
+ "compose": true,
+ "managers": [
+  {
+   "name": "Portainer",
+   "container": "apex-fake-portainer",
+   "running": true,
+   "url": "https://:19443"
+  },
+  {
+   "name": "Dockge",
+   "container": "apex-fake-dockge",
+   "running": true,
+   "url": "http://:15001"
+  }
+ ],
+ "containers": [
+  {
+   "id": "6296d50ebe3e3c2c3c9cb3cd4c86383dc22a29141a12cd55633cde0c9f8f7b85",
+   "name": "apex-dt",
+   "image": "ubuntu:24.04",
+   "imageId": "sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+   "state": "running",
+   "status": "Up 2 minutes",
+   "created": 1793273809,
+   "ports": [],
+   "networks": [
+    "bridge"
+   ],
+   "volumes": []
+  },
+  {
+   "id": "925ad97515db0e9b8c594cfeb73433433f191baf48c5396dbcb8ad382596c094",
+   "name": "apex-fake-dockge",
+   "image": "louislam/dockge:apex-test",
+   "imageId": "sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc",
+   "state": "running",
+   "status": "Up 2 minutes",
+   "created": 1793273808,
+   "ports": [
+    "15001\u21925001/tcp"
+   ],
+   "networks": [
+    "bridge"
+   ],
+   "volumes": []
+  },
+  {
+   "id": "4987684d8d99389040fedbe7667aede6ec2cb7437569133f10252801e61083e6",
+   "name": "apex-fake-portainer",
+   "image": "portainer/portainer-ce:apex-test",
+   "imageId": "sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc",
+   "state": "running",
+   "status": "Up 2 minutes",
+   "created": 1793273809,
+   "ports": [
+    "19443\u21929443/tcp"
+   ],
+   "networks": [
+    "bridge"
+   ],
+   "volumes": [
+    "apex-portainer-data"
+   ]
+  },
+  {
+   "id": "183d99836cd8b75ae07f995fe238cd0b63ddffe5f7232eb0341121ee222cd453",
+   "name": "apex-loose",
+   "image": "alpine:3.20",
+   "imageId": "sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc",
+   "state": "running",
+   "status": "Up 2 minutes",
+   "created": 1793273809,
+   "ports": [],
+   "networks": [
+    "bridge"
+   ],
+   "volumes": []
+  }
+ ],
+ "stacks": [
+  {
+   "name": "demo",
+   "manager": "dockge",
+   "dir": "/opt/stacks/demo",
+   "files": [
+    "/opt/stacks/demo/compose.yaml"
+   ],
+   "editable": true,
+   "total": 0,
+   "running": 0
+  }
+ ],
+ "images": [
+  {
+   "id": "sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+   "tags": [
+    "ubuntu:24.04"
+   ],
+   "size": 141318536,
+   "created": 1790928626,
+   "usedBy": [
+    "apex-dt"
+   ]
+  },
+  {
+   "id": "sha256:152dc042452c496007f07ca9127571cb9c29697f42acbfad72324b2bb2e43c98",
+   "tags": [
+    "ubuntu:18.04"
+   ],
+   "size": 88072031,
+   "created": 1685439550,
+   "usedBy": []
+  },
+  {
+   "id": "sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc",
+   "tags": [
+    "alpine:3.20",
+    "louislam/dockge:apex-test",
+    "portainer/portainer-ce:apex-test"
+   ],
+   "size": 13660215,
+   "created": 1776383604,
+   "usedBy": [
+    "apex-fake-dockge",
+    "apex-fake-portainer",
+    "apex-loose"
+   ]
+  }
+ ],
+ "volumes": [
+  {
+   "name": "apex-portainer-data",
+   "driver": "local",
+   "mountpoint": "/var/lib/docker/volumes/apex-portainer-data/_data",
+   "usedBy": [
+    "apex-fake-portainer"
+   ],
+   "anonymous": false
+  }
+ ],
+ "networks": [
+  {
+   "id": "14d53423e689e1d7079c192130075717febada0ae3cbdc3f908b5b81d3df178a",
+   "name": "bridge",
+   "driver": "bridge",
+   "scope": "local",
+   "containers": [
+    "apex-dt",
+    "apex-fake-dockge",
+    "apex-fake-portainer",
+    "apex-loose"
+   ],
+   "builtin": true
+  },
+  {
+   "id": "8cf32f099bdf5064c84d3e2783678cfa594763ef020795492b4d858cf169f215",
+   "name": "host",
+   "driver": "host",
+   "scope": "local",
+   "containers": [],
+   "builtin": true
+  },
+  {
+   "id": "c2f133e4c4e26dfcff1c5ebd5e9659b8bf627592f173bc140517ac1ef8eb28c4",
+   "name": "none",
+   "driver": "null",
+   "scope": "local",
+   "containers": [],
+   "builtin": true
+  },
+  {
+   "id": "5dc584e87d256a2b4f4a0b426e24d2faff9ef9a11c85a882ffe462dbb53eb269",
+   "name": "shop_default",
+   "driver": "bridge",
+   "scope": "local",
+   "containers": [],
+   "builtin": false
+  }
+ ]
+}

@@ -68,7 +68,8 @@ for name, (rx, tx) in n2.items():
     if name == "lo" or name.startswith(("veth", "docker", "br-")):
         continue
     prx, ptx = n1.get(name, (rx, tx))
-    net.append({"name": name, "inPerSec": round((rx - prx) / dt), "outPerSec": round((tx - ptx) / dt), "received": rx, "sent": tx})
+    net.append({"name": name, "inPerSec": round((rx - prx) / dt), "outPerSec": round((tx - ptx) / dt), "received": rx, "sent": tx,
+                "mac": read("/sys/class/net/%s/address" % name).strip()})
 
 disks = []
 for line in run(["df", "-kP", "-x", "tmpfs", "-x", "devtmpfs", "-x", "squashfs"]).splitlines()[1:]:
@@ -159,6 +160,104 @@ ss = run(["ss", "-Htan", "state", "established"])
 if ss:
     conns = len(ss.splitlines())
 
+# Web traffic: the end of the busiest web server's access log (last 1 MB,
+# so it stays cheap every refresh), summed over the last 10 minutes.
+# nginx / Apache "combined" lines and Caddy's JSON lines.
+import re
+from datetime import datetime
+LOG_CANDIDATES = ["/var/log/nginx/access.log", "/var/log/apache2/access.log", "/var/log/httpd/access_log",
+                  "/var/log/caddy/access.log", "/var/log/caddy/caddy.log", "/usr/local/var/log/nginx/access.log"]
+COMBINED = re.compile(r'^(\S+) \S+ \S+ \[([^\]]+)\] "(\S+) (\S+)[^"]*" (\d{3}) (\S+)(?: "[^"]*" "([^"]*)")?')
+PROBES = ("/wp-login.php", "/xmlrpc.php", "/.env", "/.git", "/phpmyadmin", "/wp-admin", "/admin.php", "/cgi-bin", "/boaform", "/.aws")
+BOTS = ("bot", "crawl", "spider", "slurp", "curl", "wget", "python-requests", "go-http-client", "scanner")
+
+def parse_line(line):
+    """One access-log line -> (epoch, client, method, path, status, bytes, agent) or None."""
+    line = line.strip()
+    if line.startswith("{"):
+        try:
+            j = json.loads(line)
+            r = j.get("request", {})
+            ua = (r.get("headers", {}).get("User-Agent") or [""])[0]
+            return (float(j.get("ts", 0)), r.get("remote_ip") or r.get("client_ip") or r.get("remote_addr", "").rsplit(":", 1)[0],
+                    r.get("method", ""), r.get("uri", ""), int(j.get("status", 0)), int(j.get("size", 0)), ua)
+        except Exception:
+            return None
+    m = COMBINED.match(line)
+    if not m:
+        return None
+    try:
+        t = datetime.strptime(m.group(2), "%d/%b/%Y:%H:%M:%S %z").timestamp()
+    except Exception:
+        return None
+    size = m.group(6)
+    return (t, m.group(1), m.group(3), m.group(4), int(m.group(5)), int(size) if size.isdigit() else 0, m.group(7) or "")
+
+def tail(path, limit=1 << 20):
+    with open(path, "rb") as f:
+        f.seek(0, 2)
+        size = f.tell()
+        f.seek(max(0, size - limit))
+        data = f.read().decode("utf-8", "replace")
+    lines = data.splitlines()
+    return lines[1:] if size > limit else lines      # the first line may be cut in half
+
+def summarize(lines, now, window=600):
+    """Pure (tested by hand and in CI): the last `window` seconds of requests."""
+    reqs = [r for r in (parse_line(l) for l in lines) if r and now - window <= r[0] <= now + 60]
+    if not reqs:
+        return {"requests": 0, "window": window}
+    span = max(60.0, now - min(r[0] for r in reqs))
+    statuses = {"2xx": 0, "3xx": 0, "4xx": 0, "5xx": 0}
+    paths, clients, errors, notfound, probes = {}, {}, {}, {}, {}
+    total_bytes, bots = 0, 0
+    for t, ip, method, path, status, size, ua in reqs:
+        key = "%dxx" % (status // 100)
+        if key in statuses:
+            statuses[key] += 1
+        clean = path.split("?", 1)[0]
+        paths[clean] = paths.get(clean, 0) + 1
+        clients[ip] = clients.get(ip, 0) + 1
+        total_bytes += size
+        if any(b in ua.lower() for b in BOTS):
+            bots += 1
+        if status >= 500:
+            k = "%d %s" % (status, clean)
+            errors[k] = errors.get(k, 0) + 1
+        if status == 404:
+            notfound[ip] = notfound.get(ip, 0) + 1
+        if clean.lower().startswith(PROBES):
+            probes[ip] = probes.get(ip, 0) + 1
+    def top(d, n=5):
+        return sorted(d.items(), key=lambda kv: -kv[1])[:n]
+    # Clients that look like scanners: many 404s, or asking for well-known attack paths.
+    scanners = []
+    for ip in set(list(notfound) + list(probes)):
+        if notfound.get(ip, 0) >= 20 or probes.get(ip, 0) >= 3:
+            scanners.append({"ip": ip, "requests": clients.get(ip, 0), "notFound": notfound.get(ip, 0), "probes": probes.get(ip, 0)})
+    scanners.sort(key=lambda s: -(s["notFound"] + s["probes"] * 10))
+    return {
+        "requests": len(reqs), "window": round(span), "perMinute": round(len(reqs) / span * 60, 1),
+        "statuses": statuses, "bytes": total_bytes, "bots": bots,
+        "topPaths": [{"path": p, "count": c} for p, c in top(paths)],
+        "topClients": [{"ip": ip, "count": c} for ip, c in top(clients)],
+        "errors": [{"what": k, "count": c} for k, c in top(errors)],
+        "scanners": scanners[:5],
+    }
+
+web_traffic = None
+logs = [p for p in LOG_CANDIDATES if os.path.isfile(p)]
+if logs:
+    newest = max(logs, key=lambda p: os.path.getmtime(p))
+    try:
+        web_traffic = summarize(tail(newest), time.time())
+        web_traffic["log"] = newest
+        web_traffic["readable"] = True
+    except PermissionError:
+        web_traffic = {"log": newest, "readable": False, "requests": 0, "window": 600}
+    except Exception:
+        web_traffic = None
+
 load = read("/proc/loadavg").split()
 print(json.dumps({
     "agent": 1,
@@ -174,4 +273,5 @@ print(json.dumps({
                "swapTotal": mem.get("SwapTotal", 0), "swapFree": mem.get("SwapFree", 0)},
     "disks": disks, "network": net, "processes": procs, "gpus": gpus, "containers": containers,
     "failedServices": failed, "services": services, "sessions": sessions, "webServers": web, "connections": conns,
+    "webTraffic": web_traffic,
 }))

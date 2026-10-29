@@ -64,10 +64,17 @@ public enum FanControl {
         /// this time. Apex renews it every minute while it's wanted, so it
         /// lapses by itself if Apex stops (see `sleepDisabled`).
         public var stayAwakeUntil: Date?
+        /// Firmware that can only stop charging by disconnecting the adapter
+        /// ("hold"): may Apex hold the limit that way, running the Mac on its
+        /// battery while plugged in? nil / false = never: the adapter always
+        /// powers the Mac, and the limit can't be held on that firmware.
+        public var holdOnBattery: Bool?
         public init(heartbeat: Date = Date(), fans: [FanSetting] = [], chargeLimit: Int? = nil, chargeOverrideUntil: Date? = nil,
-                    chargeSchedules: [ChargeSchedule]? = nil, nightCharging: NightCharging? = nil, stayAwakeUntil: Date? = nil) {
+                    chargeSchedules: [ChargeSchedule]? = nil, nightCharging: NightCharging? = nil, stayAwakeUntil: Date? = nil,
+                    holdOnBattery: Bool? = nil) {
             self.heartbeat = heartbeat; self.fans = fans; self.chargeLimit = chargeLimit; self.chargeOverrideUntil = chargeOverrideUntil
             self.chargeSchedules = chargeSchedules; self.nightCharging = nightCharging; self.stayAwakeUntil = stayAwakeUntil
+            self.holdOnBattery = holdOnBattery
         }
         public var allAutomatic: Bool { fans.allSatisfy { $0.mode == .auto } }
     }
@@ -80,10 +87,26 @@ public enum FanControl {
         public var chargingBlocked: Bool
         public var batteryPercent: Int?
         public var message: String?
+        /// The power adapter is plugged in.
+        public var onAdapter: Bool?
+        /// Plugged in, yet the battery is powering the Mac (`drainingOnAdapter`).
+        public var batteryPowering: Bool?
+        /// Something else had disconnected the adapter (SMC `CHIE`); the helper connected it again.
+        public var adapterRestored: Bool?
+        /// The limit isn't held because that would run the Mac on battery (`holdOnBattery` off).
+        public var limitNotHeld: Bool?
+        /// What happened while the Mac was off (from `OffRecord`), shown until the next restart.
+        public var whileOff: String?
+        /// The running helper's `FanControl.helperVersion` (nil = written before versions existed).
+        public var helperVersion: Int?
         public init(updated: Date = Date(), fanTargets: [Int: Double] = [:], chargeMethod: String? = nil,
-                    chargingBlocked: Bool = false, batteryPercent: Int? = nil, message: String? = nil) {
+                    chargingBlocked: Bool = false, batteryPercent: Int? = nil, message: String? = nil,
+                    onAdapter: Bool? = nil, batteryPowering: Bool? = nil, adapterRestored: Bool? = nil,
+                    limitNotHeld: Bool? = nil, whileOff: String? = nil, helperVersion: Int? = nil) {
             self.updated = updated; self.fanTargets = fanTargets; self.chargeMethod = chargeMethod
             self.chargingBlocked = chargingBlocked; self.batteryPercent = batteryPercent; self.message = message
+            self.onAdapter = onAdapter; self.batteryPowering = batteryPowering; self.adapterRestored = adapterRestored
+            self.limitNotHeld = limitNotHeld; self.whileOff = whileOff; self.helperVersion = helperVersion
         }
     }
     public static let statusPath = "/Library/Application Support/Apex/status.json"
@@ -148,6 +171,95 @@ public enum FanControl {
         if percent >= limit { return true }
         if currentlyBlocked && percent > limit - chargeHysteresis { return true }
         return false
+    }
+
+    // MARK: Helper version
+
+    /// The helper's version. Raised only when the helper's own behaviour
+    /// changes (its code in Sources/ApexFanHelper or this file), never for an
+    /// ordinary Apex build, so Apex asks for the password to update it only
+    /// when that brings something. `HelperVersionTests` fails when the
+    /// helper's code changes without this being raised.
+    /// 1: before versions (2026-10-25). 2: the adapter powers the Mac at the limit (#18).
+    public static let helperVersion = 2
+
+    /// What each version brings, in plain words, for the "update available" note.
+    public static let helperNews: [Int: String] = [
+        2: "At the limit your Mac runs from the power adapter, and charging can stay paused while it’s off.",
+    ]
+
+    /// Everything newer than the running helper, oldest first. Pure: tested.
+    public static func helperNewsSince(_ running: Int?) -> [String] {
+        helperNews.filter { $0.key > (running ?? 1) && $0.key <= helperVersion }.sorted { $0.key < $1.key }.map(\.value)
+    }
+
+    /// The installed helper is older than this Apex's. Not knowing (no status
+    /// yet) isn't "older". Pure: tested.
+    public static func helperNeedsUpdate(running: Int?, statusKnown: Bool) -> Bool {
+        statusKnown && (running ?? 1) < helperVersion
+    }
+
+    // MARK: Power from the adapter
+
+    /// May the helper stop charging with this method? "pause" stops charging
+    /// and the adapter keeps powering the Mac, so always. "hold" disconnects
+    /// the adapter (the Mac runs on battery), so only when the person allowed it.
+    public static func mayBlock(method: String?, holdOnBattery: Bool?) -> Bool {
+        switch method {
+        case "pause"?: return true
+        case "hold"?: return holdOnBattery == true
+        default: return false
+        }
+    }
+
+    /// Plugged in, but the battery is supplying the power: more than 150 mA
+    /// going out of it (a few mA either way is normal at rest).
+    public static func drainingOnAdapter(externalConnected: Bool?, amperageMA: Int?) -> Bool {
+        externalConnected == true && (amperageMA ?? 0) <= -150
+    }
+
+    /// While charging is paused, the adapter must stay connected: SMC `CHIE`
+    /// non-zero means something (another battery app, a killed helper) cut it
+    /// off. True = write 0 to connect it again.
+    public static func shouldReconnectAdapter(method: String?, chie: [UInt8]?) -> Bool {
+        guard method == "pause", let chie else { return false }
+        return chie.contains { $0 != 0 }
+    }
+
+    // MARK: While the Mac is off
+
+    /// What the helper saw as the Mac shut down (it can't run while the Mac is off).
+    public struct OffRecord: Codable, Equatable, Sendable {
+        public var percent: Int
+        public var at: Date
+        public var limit: Int?
+        /// Charging was left paused for the shutdown.
+        public var paused: Bool
+        public init(percent: Int, at: Date, limit: Int?, paused: Bool) {
+            self.percent = percent; self.at = at; self.limit = limit; self.paused = paused
+        }
+    }
+    public static let offRecordPath = "/Library/Application Support/Apex/off.json"
+
+    /// On shutdown (SIGTERM): leave charging paused so a firmware that keeps
+    /// the setting doesn't charge while the Mac is off. Only for "pause" (the
+    /// adapter stays connected), only while the settings file is there (it's
+    /// deleted first when the helper is removed) and a limit applies.
+    public static func keepPausedOnExit(method: String?, configPresent: Bool, blocked: Bool, limit: Int?) -> Bool {
+        method == "pause" && configPresent && blocked && limit != nil
+    }
+
+    /// After a restart: did the battery charge while the Mac was off? Nil when
+    /// there's nothing worth saying (no limit, no record, or it barely moved).
+    public static func whileOffNote(_ r: OffRecord?, nowPercent: Int?) -> String? {
+        guard let r, let limit = r.limit, let now = nowPercent else { return nil }
+        if now > max(r.percent, limit) + 1 {
+            return "While this Mac was off it charged from \(r.percent)% to \(now)%, past your \(limit)% limit. "
+                + "Apex can’t run while the Mac is off, and this Mac’s firmware charges anyway. Charging stays paused now; "
+                + "the power adapter powers the Mac and the battery comes down as you use it unplugged."
+        }
+        if r.paused, now <= r.percent + 1 { return "Stayed at \(now)% while this Mac was off." }
+        return nil
     }
 
     /// "Charge to 100% now" is active until it expires or the battery has

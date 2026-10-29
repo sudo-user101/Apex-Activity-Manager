@@ -6,7 +6,10 @@
   and Shell's Open in Terminal drives Terminal (both via osascript);
   without this the hardened runtime blocks them. Nothing else is needed: Apex uses no camera,
   microphone, location, contacts, calendars or photos, loads only Apple's own
-  frameworks, and needs no JIT.
+  frameworks, and needs no JIT. Volume per app (menu bar › Sound) uses Core
+  Audio process taps, which macOS asks about as "System Audio Recording"
+  (NSAudioCaptureUsageDescription in Info.plist); it isn't the microphone,
+  so no audio-input entitlement.
 -->
 <plist version="1.0">
 <dict>

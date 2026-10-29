@@ -295,3 +295,57 @@ final class PromiseWriter: NSObject, NSFilePromiseProviderDelegate {
         }
     }
 }
+
+final class InPlaceCompressorTests: XCTestCase {
+    func testFinalNames() {
+        let png = URL(fileURLWithPath: "/x/Shot.png")
+        XCTAssertEqual(InPlaceCompressor.finalURL(for: png, compressedExtension: "heic", exists: { _ in false }).path, "/x/Shot.heic")
+        XCTAssertEqual(InPlaceCompressor.finalURL(for: png, compressedExtension: "heic", exists: { $0 == "/x/Shot.heic" }).path, "/x/Shot 2.heic",
+                       "never over another file")
+        let jpg = URL(fileURLWithPath: "/x/a.jpeg")
+        XCTAssertEqual(InPlaceCompressor.finalURL(for: jpg, compressedExtension: "jpg", exists: { _ in true }), jpg, "JPEG stays JPEG, same name")
+    }
+
+    /// Real photos in a temporary folder: nothing changes until Done; then each
+    /// original is replaced by its smaller copy and the folder is smaller.
+    func testCompressAFolderInPlace() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("apex-inplace-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        // A noisy 1200×900 PNG compresses well as HEIC.
+        let w = 1200, h = 900
+        var px = [UInt8](repeating: 0, count: w * h * 4)
+        for i in stride(from: 0, to: px.count, by: 4) { px[i] = UInt8(i % 251); px[i + 1] = UInt8((i / 7) % 253); px[i + 2] = UInt8((i / 13) % 241); px[i + 3] = 255 }
+        let ctx = CGContext(data: &px, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4, space: CGColorSpaceCreateDeviceRGB(),
+                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        let image = ctx.makeImage()!
+        for name in ["one.png", "two.png"] {
+            let d = CGImageDestinationCreateWithURL(dir.appendingPathComponent(name) as CFURL, UTType.png.identifier as CFString, 1, nil)!
+            CGImageDestinationAddImage(d, image, nil); XCTAssertTrue(CGImageDestinationFinalize(d))
+        }
+        try Data("not a photo".utf8).write(to: dir.appendingPathComponent("notes.txt"))
+
+        let plan = InPlaceCompressor.plan([dir.path])
+        XCTAssertEqual(plan.local.count, 2, "photos only")
+        XCTAssertTrue(plan.online.isEmpty)
+        let before = plan.localBytes
+        let made = await InPlaceCompressor.makeCopies(plan.local, keepDetails: true, progress: { _, _ in }, cancelled: { false })
+        XCTAssertEqual(made.copies.count, 2, "\(made.skipped)")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dir.appendingPathComponent("one.png").path), "originals untouched until Done")
+
+        var trashed: [URL] = []
+        let failed = InPlaceCompressor.swapIn(made.copies)
+        XCTAssertTrue(failed.isEmpty)
+        let files = try FileManager.default.contentsOfDirectory(atPath: dir.path).sorted()
+        XCTAssertEqual(files.filter { !$0.hasPrefix(".") }, ["notes.txt", "one.\(made.copies[0].finalURL.pathExtension)", "two.\(made.copies[1].finalURL.pathExtension)"].sorted())
+        let after = made.copies.reduce(UInt64(0)) { $0 + $1.after }
+        XCTAssertLessThan(after, before)
+        // Tidy the originals this test put in the Trash.
+        for c in made.copies {
+            let trash = FileManager.default.urls(for: .trashDirectory, in: .userDomainMask)[0]
+            if let hit = (try? FileManager.default.contentsOfDirectory(at: trash, includingPropertiesForKeys: nil))?
+                .first(where: { $0.lastPathComponent.hasPrefix(c.original.deletingPathExtension().lastPathComponent) && $0.pathExtension == "png" }) { trashed.append(hit) }
+        }
+        trashed.forEach { try? FileManager.default.removeItem(at: $0) }
+    }
+}

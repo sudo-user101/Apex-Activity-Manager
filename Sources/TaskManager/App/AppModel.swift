@@ -4,7 +4,7 @@ import ProcessIdentityCore
 import SwiftUI
 
 enum AppSection: String, CaseIterable, Identifiable {
-    case processes, performance, ai, history, startup, users, services, report
+    case processes, performance, ai, history, startup, users, services, report, sites, docker
     var id: String { rawValue }
 
     var title: String {
@@ -17,6 +17,8 @@ enum AppSection: String, CaseIterable, Identifiable {
         case .users: return "Users"
         case .services: return "Services"
         case .report: return "Report"
+        case .sites: return "Sites"
+        case .docker: return "Docker"
         }
     }
 
@@ -32,15 +34,20 @@ enum AppSection: String, CaseIterable, Identifiable {
         case .users: return "person.2"
         case .services: return "gearshape.2"
         case .report: return "doc.text.magnifyingglass"
+        case .sites: return "globe"
+        case .docker: return "shippingbox"
         }
     }
 
     /// The tabs for a server or container (This Mac menu). The others are
     /// about this Mac, so they're hidden then; Report is only for servers.
-    var followsTarget: Bool { [.processes, .performance, .services, .users, .report].contains(self) }
-    var onMac: Bool { self != .report }
+    var followsTarget: Bool { [.processes, .performance, .services, .users, .report, .sites, .docker].contains(self) }
+    var onMac: Bool { ![.report, .sites, .docker].contains(self) }
 
-    static func tabs(_ t: MachineTarget) -> [AppSection] { allCases.filter { t.isMac ? $0.onMac : $0.followsTarget } }
+    /// Sites (reverse proxies) and Docker Management are for servers, not containers.
+    func shows(on t: MachineTarget) -> Bool { t.isMac ? onMac : followsTarget && !((self == .sites || self == .docker) && t == .allContainers) }
+
+    static func tabs(_ t: MachineTarget) -> [AppSection] { allCases.filter { $0.shows(on: t) } }
 
     /// Views that list processes need the root/other-user `ps` fallback.
     var needsRestricted: Bool { [.processes, .users, .performance, .ai].contains(self) }
@@ -82,7 +89,7 @@ final class AppModel {
     /// Not remembered: Apex always opens on this Mac.
     var target: MachineTarget = .mac {
         didSet {
-            if target.isMac ? !section.onMac : !section.followsTarget { section = .performance }
+            if !section.shows(on: target) { section = .performance }
         }
     }
     var search = ""

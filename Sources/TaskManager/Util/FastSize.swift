@@ -5,7 +5,7 @@ import Foundation
 /// split across all CPU cores, each walked with Foundation's enumerator
 /// (which reads directories in bulk).
 enum FastSize {
-    private static let keys: [URLResourceKey] = [.totalFileAllocatedSizeKey, .fileAllocatedSizeKey, .isRegularFileKey]
+    private static let keys: [URLResourceKey] = [.totalFileAllocatedSizeKey, .fileAllocatedSizeKey, .isRegularFileKey, .isDirectoryKey]
     private static let keySet = Set(keys)
 
     /// Allocated bytes, and whether anything inside couldn't be read.
@@ -20,6 +20,7 @@ enum FastSize {
         if v.isDirectory != true || v.isSymbolicLink == true {
             return (UInt64(v.totalFileAllocatedSize ?? v.fileAllocatedSize ?? 0), false)
         }
+        if Dataless.folder(url.path) { return (0, false) }      // in the cloud only: nothing on disk, and listing it would ask the server
         guard let children = try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: keys + [.isDirectoryKey, .isSymbolicLinkKey]) else {
             return (0, true)
         }
@@ -42,6 +43,7 @@ enum FastSize {
         if v?.isDirectory != true || v?.isSymbolicLink == true {
             return (UInt64(v?.totalFileAllocatedSize ?? v?.fileAllocatedSize ?? 0), v == nil)
         }
+        if Dataless.folder(url.path) { return (0, false) }
         var partial = false
         guard let e = FileManager.default.enumerator(at: url, includingPropertiesForKeys: keys, options: [],
                                                      errorHandler: { _, _ in partial = true; return true }) else { return (0, true) }
@@ -49,7 +51,9 @@ enum FastSize {
         for case let u as URL in e {
             n += 1
             if n & 4095 == 0, cancelled() { return (total, true) }
-            guard let r = try? u.resourceValues(forKeys: keySet), r.isRegularFile == true else { continue }
+            guard let r = try? u.resourceValues(forKeys: keySet) else { continue }
+            if r.isDirectory == true, Dataless.folder(u.path) { e.skipDescendants(); continue }
+            guard r.isRegularFile == true else { continue }
             total &+= UInt64(r.totalFileAllocatedSize ?? r.fileAllocatedSize ?? 0)
         }
         return (total, partial)

@@ -53,8 +53,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             StatusBar.shared.update()
             ClipboardHistory.shared.start()
             FloatingShelf.shared.start()
+            ShelfHotKey.shared.apply()        // the shelf's keyboard shortcut, if one is chosen
+            FolderPreview.apply()             // Preview-Folder's shortcut, if it's on
+            InputTweaks.shared.apply()        // MacOSX Change behaviours that are switched on
+            ArchiveServices.register()        // Finder's right-click › Services: look inside, extract, compress
+            PermissionCenter.shared.clearStaleAfterUpdate()   // a new build or update: old switches that no longer apply
+            AppSwitcher.shared.apply()        // the window switcher, if it's on
+            // Test switch: APEX_OPEN=folderpreview:<path> previews that folder at launch.
+            if let v = ProcessInfo.processInfo.environment["APEX_OPEN"], v.hasPrefix("folderpreview:") {
+                let path = String(v.dropFirst("folderpreview:".count))
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { FolderPreviewPanel.shared.show(URL(fileURLWithPath: path)) }
+            }
             PinnedShelves.shared.start()
             LidAwake.shared.start()
+            AppVolumeStore.shared.start()     // only if an app has its own volume
             DisplayStore.shared.reload()      // the Display card's arrangement; refreshed when displays change
         }
         // Test switches: APEX_OPEN=settings opens Settings at launch (APEX_SETTINGS_TAB picks the tab);
@@ -87,6 +99,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         MainActor.assumeIsolated {
             FanController.shared.restoreAutomatic()   // fans back to macOS
+            AppSwitcher.restoreSystemShortcuts()      // macOS's own ⌘Tab back
             Recorder.shared.stopAll()                 // closes the files with their summaries
             AppModel.shared.stop()
         }
@@ -106,7 +119,7 @@ struct AppCommands: Commands {
             ForEach(Array(AppSection.allCases.enumerated()), id: \.element) { i, s in
                 Button(s.title) { model.section = s }
                     .keyboardShortcut(KeyEquivalent(Character(String(i + 1))))
-                    .disabled(s == .report && model.target.isMac)
+                    .disabled(!s.shows(on: model.target))
             }
             Divider()
             Picker("Show Processes", selection: Binding(get: { model.processFilter }, set: { model.processFilter = $0 })) {

@@ -143,3 +143,42 @@ final class TransferTests: XCTestCase {
         XCTAssertFalse(TransferMonitor.belongs("/Volumes/USB/a.bin", to: ["/"]))
     }
 }
+
+final class DriveManualTests: XCTestCase {
+    func testParsers() {
+        let ok = "Started partition map verification on disk0\nChecking prerequisites\nThe partition map appears to be OK\nFinished partition map verification on disk0\n"
+        XCTAssertEqual(DriveManual.parseVerify(ok, status: 0).ok, true)
+        let bad = DriveManual.parseVerify("Checking volume\nerror: invalid node structure\nThe volume could not be verified completely\n", status: 1)
+        XCTAssertFalse(bad.ok)
+        XCTAssertTrue(bad.summary.contains("error") || bad.summary.contains("could not"), bad.summary)
+        let snaps = DriveManual.parseSnapshots("Snapshots for disk /:\ncom.apple.TimeMachine.2026-09-27-135829.local\ncom.apple.os.update-ABC\n")
+        XCTAssertEqual(snaps.count, 2)
+        XCTAssertEqual(DriveManual.snapshotDate(snaps[0]), "2026-09-27-135829")
+        XCTAssertNil(DriveManual.snapshotDate("com.apple.os.update-ABC"))
+        let lines = ["kernel: (apfs) apfs_pagein:15330: disk3s1 ino 1 error 22 (mds_stores)",
+                     "kernel: disk3s1: I/O error",
+                     "kernel: disk5s1: read error on block 12",
+                     "kernel: unrelated error in wifi"]
+        XCTAssertEqual(DriveManual.relevantErrors(lines, disks: ["disk3s1", "disk3"]), ["kernel: disk3s1: I/O error"])
+        XCTAssertEqual(DriveManual.speed(1e9, 0.5), "2.00 GB/s")
+        XCTAssertEqual(DriveManual.speed(2e8, 1), "200 MB/s")
+        XCTAssertEqual(DriveManual.parseScanProgress("done 64\nbad 64\ndone 128\n").doneMB, 128)
+        XCTAssertEqual(DriveManual.parseScanProgress("done 64\nbad 64\ndone 128\n").badMB, [64])
+        let script = DriveManual.scanScript(disk: "disk4", totalMB: 128, progress: "/tmp/p", stop: "/tmp/s")
+        XCTAssertTrue(script.contains("if=/dev/rdisk4 of=/dev/null"), "read-only: it only ever writes to /dev/null")
+        XCTAssertFalse(script.contains("of=/dev/rdisk"))
+    }
+
+    /// The read-only checks on this Mac's startup volume, for real.
+    func testReadOnlyChecksOnThisMac() async throws {
+        let disks = try XCTUnwrap(DriveManual.disks(of: "/"))
+        XCTAssertTrue(disks.physical.hasPrefix("disk"))
+        let map = await DriveManual.run(.partitionMap, volumes: [("Macintosh HD", "/")], record: nil)
+        XCTAssertTrue(map.ok, map.summary)
+        let snaps = await DriveManual.run(.snapshots, volumes: [("Macintosh HD", "/")], record: nil)
+        XCTAssertTrue(snaps.ok)
+        let w = DriveManual.writeTest(volume: "/", size: 64 << 20)
+        XCTAssertTrue(w.ok, w.summary)
+        XCTAssertTrue(w.summary.contains("Write") && w.summary.contains("read"))
+    }
+}

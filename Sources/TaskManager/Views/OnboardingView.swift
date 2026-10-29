@@ -3,6 +3,9 @@ import SwiftUI
 /// First launch: welcome, a short tour, every permission in one place, done.
 /// Also opened from Help › Welcome to Apex and Settings › Permissions.
 struct OnboardingView: View {
+    /// Raised when the welcome changes enough to show it again after an update.
+    static let version = 2
+    static let versionKey = "welcomeVersion"
     @Environment(\.dismiss) private var dismiss
     @AppStorage("onboarded") private var onboarded = false
     @State var step: Int = 0
@@ -40,13 +43,13 @@ struct OnboardingView: View {
                 Spacer()
                 if step > 0 && step < 3 { Button("Back") { go(step - 1) } }
                 Button(step == 3 ? "Start Using Apex" : (step == 2 ? "Continue" : "Next")) {
-                    if step == 3 { onboarded = true; dismiss() } else { go(step + 1) }
+                    if step == 3 { onboarded = true; UserDefaults.standard.set(Self.version, forKey: Self.versionKey); dismiss() } else { go(step + 1) }
                 }
                 .keyboardShortcut(.defaultAction)
             }
             .padding(16)
         }
-        .frame(width: 620, height: 520)
+        .frame(width: 640, height: 600)
         .onAppear { perms.refresh() }
     }
 
@@ -54,11 +57,17 @@ struct OnboardingView: View {
 
     private var welcome: some View {
         VStack(spacing: 14) {
-            Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 96, height: 96)
-            Text("Welcome to Apex").font(.largeTitle.weight(.bold))
+            Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 104, height: 104)
+            VStack(spacing: 4) {
+                Text("Welcome to Apex Activity Manager").font(.largeTitle.weight(.bold)).multilineTextAlignment(.center)
+                Text("by CyberNet Labs").font(.title3.weight(.medium)).foregroundStyle(.secondary)
+            }
             Text("See what your Mac is doing, find out why it’s slow, full or offline, and fix it, in plain words.")
-                .font(.title3).multilineTextAlignment(.center).foregroundStyle(.secondary).frame(maxWidth: 440)
-            Text("By CyberNet Labs").font(.caption).foregroundStyle(.tertiary)
+                .font(.title3).multilineTextAlignment(.center).foregroundStyle(.secondary).frame(maxWidth: 460)
+            Label("Apex reads your Mac on your Mac. Nothing about it is sent anywhere unless you use an online feature yourself (speed test, an AI service with your key, a server you add).",
+                  systemImage: "lock.shield")
+                .font(.callout).foregroundStyle(.secondary).frame(maxWidth: 460).fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 6)
         }
         .padding(30)
     }
@@ -82,9 +91,14 @@ struct OnboardingView: View {
     private var permissionsPage: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Permissions").font(.title.weight(.bold))
-            Text("Everything Apex can use, in one place. Grant what you want now; you can change any of it later in Settings.")
-                .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            PermissionsList()
+            HStack(alignment: .top) {
+                Text("Everything Apex can use, in one place. Allow what you want now; you can change any of it later in Settings › Permissions. Apex only uses each one for what it says.")
+                    .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 12)
+                Button("Allow All") { perms.allowAll() }
+                    .help("Asks for each one macOS lets an app ask for, then opens the Full Disk Access switch. The fan and battery helper is left for you to install, as it needs your password.")
+            }
+            ScrollView { PermissionsList() }
         }
         .padding(30)
     }
@@ -103,9 +117,24 @@ struct OnboardingView: View {
 /// The permission rows, shared by the welcome flow and Settings.
 struct PermissionsList: View {
     private let perms = PermissionCenter.shared
+    @State private var askedInSettings: Set<Permission> = []
 
     var body: some View {
         VStack(spacing: 8) {
+            if let p = perms.allowing {
+                HStack(alignment: .top, spacing: 10) {
+                    ProgressView().controlSize(.small)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Allow All: \(p.title)").font(.headline)
+                        Text(perms.allowingNote).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer()
+                    Button("Skip") { perms.skip() }
+                    Button("Stop") { perms.stopAllowAll() }
+                }
+                .padding(10)
+                .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+            }
             ForEach(Permission.allCases) { p in
                 let ok = perms.granted[p] ?? false
                 HStack(alignment: .top, spacing: 12) {
@@ -121,8 +150,17 @@ struct PermissionsList: View {
                     if ok {
                         Label("On", systemImage: "checkmark.circle.fill").foregroundStyle(.green).labelStyle(.titleAndIcon)
                     } else {
-                        Button(p == .helper ? "Install…" : (p == .fullDisk ? "Open Settings" : "Allow")) { perms.grant(p) }
+                        VStack(alignment: .trailing, spacing: 4) {
+                            Button(p == .helper ? "Install…" : (p == .fullDisk ? "Open Settings" : "Allow")) {
+                                askedInSettings.insert(p); perms.grant(p)
+                            }
                             .controlSize(.small)
+                            if PermissionCenter.tccService(p) != nil, askedInSettings.contains(p) || perms.allowing == p {
+                                Button("Already on? Fix") { perms.resetAndAsk(p) }
+                                    .buttonStyle(.link).font(.caption)
+                                    .help("System Settings shows it on, but it’s for an earlier copy of Apex. This clears that entry and asks again; switch it on once more.")
+                            }
+                        }
                     }
                 }
                 .padding(10)
@@ -131,6 +169,13 @@ struct PermissionsList: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             perms.refresh()      // back from System Settings
+        }
+        // Switches flipped in System Settings show here within a second, even while Apex isn't in front.
+        .task {
+            while !Task.isCancelled {
+                perms.refresh()
+                try? await Task.sleep(for: .seconds(1))
+            }
         }
     }
 }

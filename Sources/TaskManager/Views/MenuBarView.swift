@@ -3,16 +3,18 @@ import QuickLookThumbnailing
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// The menu bar panel: five tabs (Monitor, Energy, Shelf, Clipboard, Sessions).
+/// The menu bar panel: six tabs (Monitor, Energy, Shelf, Clipboard, Sound, Sessions).
 /// Triple-clicking the menu bar icon opens the app (StatusBar).
 struct MenuBarPanel: View {
     @AppStorage("menuTab") private var tab = "monitor"
+    @AppStorage(CleanKeyboard.Keys.enabled) private var cleanKeyboard = false
 
     private let tabs: [(key: String, title: String, symbol: String)] = [
         ("monitor", "Monitor", "gauge.with.dots.needle.33percent"),
         ("energy", "Energy", "bolt.fill"),
         ("shelf", "Shelf", "tray.full"),
         ("clipboard", "Clipboard", "doc.on.clipboard"),
+        ("sound", "Sound: what’s playing and each app’s volume", "speaker.wave.2.fill"),
         ("sessions", "Sessions: close your apps now, reopen them later", "rectangle.stack"),
     ]
 
@@ -31,6 +33,13 @@ struct MenuBarPanel: View {
                     .buttonStyle(.plain)
                     .help(t.title)
                 }
+                if cleanKeyboard {
+                    Button { CleanKeyboard.shared.start() } label: {
+                        Image(systemName: "keyboard").frame(width: 24, height: 24).foregroundStyle(.secondary).contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Clean Keyboard: lock the keyboard for \(CleanKeyboard.clock(CleanKeyboard.seconds)) while you wipe it")
+                }
                 Menu {
                     Button("Settings…") { NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil); NSApp.activate(ignoringOtherApps: true) }
                     Divider()
@@ -48,6 +57,7 @@ struct MenuBarPanel: View {
             case "energy": EnergyTab()
             case "shelf": ShelfTab()
             case "clipboard": ClipboardTab()
+            case "sound": SoundTab()
             case "sessions": SessionsTab()
             default: MonitorTab()
             }
@@ -190,9 +200,49 @@ struct ShelfTab: View {
     var onMinimize: ((@escaping @MainActor () -> Void) -> Void)? = nil
     /// Opens a kept shelf (floating: by the edge handle; menu bar: in place).
     var onOpen: ((ShelfTarget) -> Void)? = nil
+    /// One chip in the menu bar panel's row: a pinned category or menu bar shelf (target),
+    /// or a recently closed shelf (no target: a click brings it back).
+    @ViewBuilder private func chip(_ shelf: ShelfSet, _ target: ShelfTarget?, _ name: String?) -> some View {
+        Button { if let target { open(target) } else { store.restore(shelf); open(.current) } } label: {
+            // The same chip for every stack: its pile, "7 · 📷", and a pin when it's in the menu bar.
+            HStack(spacing: 7) {
+                ShelfPreview(items: shelf.items).frame(width: 30, height: 26)
+                Text("\(shelf.items.count)").font(.caption.weight(.semibold)).monospacedDigit()
+                Text("·").font(.caption).foregroundStyle(.tertiary)
+                HStack(spacing: 3) {
+                    ForEach(shelf.kindSymbols.prefix(3), id: \.self) { Image(systemName: $0) }
+                }
+                .font(.caption).foregroundStyle(.secondary)
+                if target == nil {
+                    Image(systemName: "clock.arrow.circlepath").font(.system(size: 9)).foregroundStyle(.secondary)
+                } else {
+                    Image(systemName: "pin.fill").font(.system(size: 8)).foregroundStyle(ShelfLook.color(shelf.color) ?? .secondary)
+                }
+            }
+            .padding(.leading, 5).padding(.trailing, 10)
+            .frame(height: 34)
+            .background(Color.white.opacity(0.08), in: Capsule())
+            .fixedSize()
+        }
+        .buttonStyle(.plain)
+        .onDrop(of: ShelfDrop.types, isTargeted: nil) { _ in
+            guard let target else { return false }          // recently closed: open it to add to it
+            drop(into: target); return true
+        }
+        .help(chipHelp(shelf, pinned: target != nil, name: name))
+    }
+
+    private func chipHelp(_ shelf: ShelfSet, pinned: Bool, name: String?) -> String {
+        let what: String = shelf.kinds.map(\.text).joined(separator: ", ")
+        if !pinned { return "Recently closed: \(what). Click to bring it back." }
+        let prefix: String = name.map { "\($0): " } ?? ""
+        return prefix + what + " · pinned in the menu bar"
+    }
+
     /// A pinned category's own menu bar panel: it always shows that category (no back button).
     var fixed = false
-    private let store = ShelfStore.shared
+    /// The app's shelves (a separate store in render tests).
+    var store: ShelfStore = .shared
     @State private var showLibrary = false
     @State private var targeted = false
     @State private var busy = Set<UUID>()
@@ -227,7 +277,7 @@ struct ShelfTab: View {
                             .contentShape(Circle())
                     }
                     .buttonStyle(.plain)
-                    .help(store.open == .current ? "Close this shelf. It moves to Recent shelves, and the next drag starts a new one."
+                    .help(store.open == .current ? "Close this shelf. It goes to Recently closed (in the Shelves list), and the next drag starts a new one."
                                                  : "Close. It stays where it was kept.")
                 }
                 if let onMinimize { ShelfMinimizeButton(onMinimize: onMinimize) }
@@ -258,38 +308,24 @@ struct ShelfTab: View {
                     .disabled(shelf.items.isEmpty)
                 }
             }
-            // In the menu bar panel: shelves minimized to the menu bar and the
-            // categories with files, one click away; drop files on one to add them.
-            // Pinned categories first, then the other categories with files, then shelves kept here.
+            // In the menu bar panel, one click away: what's pinned (pinned
+            // categories, and shelves minimized to the menu bar) — drop files on
+            // one to add them — then, after a bar, the last two recently closed
+            // shelves, to bring one back. Other categories are in the shelf list.
             let cats = store.categories.filter { !$0.items.isEmpty }
-            let kept = (cats.filter { $0.pinned == true } + cats.filter { $0.pinned != true }).map { ($0, ShelfTarget.category($0.id), $0.name) }
-                + store.menuBarShelves.map { ($0, ShelfTarget.side($0.id), Optional<String>.none) }
+            let pinned: [(ShelfSet, ShelfTarget?, String?)] = cats.filter { $0.pinned == true }.map { ($0, ShelfTarget.category($0.id), $0.name) }
+                + store.menuBarShelves.map { ($0, ShelfTarget.side($0.id), nil) }
+            let others: [(ShelfSet, ShelfTarget?, String?)] = Array(store.shelves.dropFirst().filter { !$0.items.isEmpty }.prefix(2)).map { ($0, nil, nil) }
+            let kept = pinned + others
             if onClose == nil, store.open == .current, !kept.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
                         ForEach(kept, id: \.0.id) { shelf, target, name in
-                            Button { open(target) } label: {
-                                // The same chip for every stack: its pile, "7 · 📷", and a pin when it's in the menu bar.
-                                HStack(spacing: 7) {
-                                    ShelfPreview(items: shelf.items).frame(width: 30, height: 26)
-                                    Text("\(shelf.items.count)").font(.caption.weight(.semibold)).monospacedDigit()
-                                    Text("·").font(.caption).foregroundStyle(.tertiary)
-                                    HStack(spacing: 3) {
-                                        ForEach(shelf.kindSymbols.prefix(3), id: \.self) { Image(systemName: $0) }
-                                    }
-                                    .font(.caption).foregroundStyle(.secondary)
-                                    if shelf.pinned == true {
-                                        Image(systemName: "pin.fill").font(.system(size: 8)).foregroundStyle(ShelfLook.color(shelf.color) ?? .secondary)
-                                    }
-                                }
-                                .padding(.leading, 5).padding(.trailing, 10)
-                                .frame(height: 34)
-                                .background(Color.white.opacity(0.08), in: Capsule())
-                                .fixedSize()
+                            // A bar between what's pinned and the recently closed ones.
+                            if !pinned.isEmpty, !others.isEmpty, shelf.id == others[0].0.id {
+                                Capsule().fill(Color.white.opacity(0.25)).frame(width: 2, height: 24).padding(.horizontal, 2)
                             }
-                            .buttonStyle(.plain)
-                            .onDrop(of: ShelfDrop.types, isTargeted: nil) { _ in drop(into: target); return true }
-                            .help((name.map { "\($0): " } ?? "") + shelf.kinds.map(\.text).joined(separator: ", ") + (shelf.pinned == true ? " · in the menu bar" : ""))
+                            chip(shelf, target, name)
                         }
                     }
                 }
@@ -487,6 +523,7 @@ struct ShelfTab: View {
             .separator(),
             ClosureMenuItem(title: "Open All") { urls.forEach { NSWorkspace.shared.open($0) } },
             ClosureMenuItem(title: "Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting(urls) },
+            ClosureMenuItem(title: "Share All…") { ShelfShare.pick(urls) },
             .separator(),
             ClosureMenuItem(title: "Clear Shelf") { store.clearCurrent() },
         ]
@@ -607,8 +644,38 @@ struct ShelfTab: View {
         Button("Open") { NSWorkspace.shared.open(item.url) }
         Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([item.url]) }
         Button("Rename…") { startRename(item) }.disabled(!item.exists || busy.contains(item.id))
+        // AirDrop, Messages, Mail… and the folders files were sent to last.
+        ShareLink(item: item.url) { Text("Share") }.disabled(!item.exists)
+        Menu("Move To") { destinations(item, move: true) }.disabled(!item.exists || busy.contains(item.id))
+        Menu("Copy To") { destinations(item, move: false) }.disabled(!item.exists)
         Divider()
         Button("Remove from Shelf") { store.remove(item) }
+    }
+
+    @ViewBuilder private func destinations(_ item: ShelfItem, move: Bool) -> some View {
+        ForEach(ShelfDestinations.folders, id: \.self) { f in
+            Button(FileManager.default.displayName(atPath: f.path)) { send(item, to: f, move: move) }
+        }
+        if !ShelfDestinations.folders.isEmpty { Divider() }
+        Button("Desktop") { send(item, to: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Desktop"), move: move) }
+        Button("Choose Folder…") {
+            let panel = NSOpenPanel()
+            panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.canCreateDirectories = true
+            panel.prompt = move ? "Move Here" : "Copy Here"
+            NSApp.activate(ignoringOtherApps: true)
+            if panel.runModal() == .OK, let f = panel.url { send(item, to: f, move: move) }
+        }
+    }
+
+    /// Moves (the shelf follows the file) or copies (the shelf keeps the original); never overwrites.
+    private func send(_ item: ShelfItem, to folder: URL, move: Bool) {
+        do {
+            let to = try store.send(item, to: folder, move: move)
+            note = "\(move ? "Moved" : "Copied") to \(FileManager.default.displayName(atPath: folder.path))"
+                + (to.lastPathComponent == item.name ? "." : " as “\(to.lastPathComponent)”.")
+        } catch {
+            note = "Couldn’t \(move ? "move" : "copy") “\(item.name)”: \(error.localizedDescription)"
+        }
     }
 
     private func startRename(_ item: ShelfItem) {
@@ -1137,5 +1204,16 @@ struct CompareView: View {
             Text(url.lastPathComponent).font(.caption2).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
         }
         .frame(width: 225)
+    }
+}
+
+/// The system share picker (AirDrop, Messages, Mail…) for several files, by the pointer.
+@MainActor
+enum ShelfShare {
+    static func pick(_ urls: [URL]) {
+        guard !urls.isEmpty, let window = NSApp.keyWindow ?? NSApp.windows.first(where: { $0.isVisible }), let view = window.contentView else { return }
+        let p = window.convertPoint(fromScreen: NSEvent.mouseLocation)
+        let at = view.convert(p, from: nil)
+        NSSharingServicePicker(items: urls).show(relativeTo: NSRect(x: at.x, y: at.y, width: 1, height: 1), of: view, preferredEdge: .minY)
     }
 }

@@ -47,5 +47,9 @@ struct AlertsSettingsTab: View {
         // History edits the same settings: start from what's saved each time.
         .onAppear { s = Alerts.shared.settings }
         .onChange(of: s) { Alerts.shared.settings = s }
+        .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
+            let now = Alerts.shared.settings
+            if now != s { s = now }
+        }
     }
 }

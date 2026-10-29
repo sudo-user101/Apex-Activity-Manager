@@ -10,35 +10,39 @@ enum ServerEdition {
     static let defaultPort = 7443
 
     /// What pairing gives back.
-    struct Paired: Equatable, Sendable { let token: String; let fingerprint: String; let host: String }
+    struct Paired: Equatable, Sendable { let token: String; let fingerprint: String; let host: String; var key: String? = nil }
 
     /// Pairs with a server using the code its install printed.
     static func pair(host: String, port: Int, code: String, device: String) async -> Result<Paired, ServerError> {
-        let pin = PinDelegate(expected: nil)
-        let session = URLSession(configuration: config(), delegate: pin, delegateQueue: nil)
-        defer { session.finishTasksAndInvalidate() }
-        guard let hello = url(host, port, "/api/hello"), let pairURL = url(host, port, "/api/pair") else {
-            return .failure(.other("That address doesn’t look right."))
-        }
-        do {
-            let (hd, hr) = try await session.data(from: hello)
-            guard (hr as? HTTPURLResponse)?.statusCode == 200,
-                  let o = try? JSONSerialization.jsonObject(with: hd) as? [String: Any], (o["product"] as? String)?.contains("Apex") == true else {
-                return .failure(.other("Something answered on port \(port), but it isn’t Apex Server Edition."))
+        let h = host.trimmingCharacters(in: .whitespaces)
+        guard !h.isEmpty, url(h, port, "/") != nil else { return .failure(.other("That address doesn’t look right.")) }
+        return await Task.detached(priority: .userInitiated) { () -> Result<Paired, ServerError> in
+            switch PinnedHTTP.send(host: h, port: port, path: "/api/hello", expected: nil, timeout: 15) {
+            case .failure(let f): return .failure(problem(f, pinned: false))
+            case .success(let hello):
+                guard hello.status == 200, let o = try? JSONSerialization.jsonObject(with: hello.body) as? [String: Any],
+                      (o["product"] as? String)?.contains("Apex") == true else {
+                    return .failure(.other("Something answered on port \(port), but it isn’t Apex Server Edition."))
+                }
+                let body = (try? JSONSerialization.data(withJSONObject: ["code": code, "device": device])) ?? Data()
+                // The same certificate as the hello, so nothing can step in between the two.
+                switch PinnedHTTP.send(host: h, port: port, method: "POST", path: "/api/pair", headers: ["Content-Type": "application/json"],
+                                       body: body, expected: hello.fingerprint, timeout: 15) {
+                case .failure(let f): return .failure(problem(f, pinned: true))
+                case .success(let r):
+                    let j = (try? JSONSerialization.jsonObject(with: r.body) as? [String: Any]) ?? [:]
+                    guard r.status == 200, let token = j["token"] as? String else {
+                        return .failure(.other((j["error"] as? String) ?? "The server didn’t accept the code."))
+                    }
+                    // The key pin (the same through the server's certificate renewals);
+                    // the server says it too (1.1+), and it must be the one actually seen.
+                    if let said = j["key"] as? String, let key = r.key, said != key {
+                        return .failure(.other("The server’s key doesn’t match its certificate. Pair again; if it keeps happening, something may be standing in for the server."))
+                    }
+                    return .success(Paired(token: token, fingerprint: r.fingerprint, host: j["host"] as? String ?? h, key: r.key))
+                }
             }
-            var req = URLRequest(url: pairURL)
-            req.httpMethod = "POST"
-            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            req.httpBody = try JSONSerialization.data(withJSONObject: ["code": code, "device": device])
-            let (d, r) = try await session.data(for: req)
-            let j = (try? JSONSerialization.jsonObject(with: d) as? [String: Any]) ?? [:]
-            guard (r as? HTTPURLResponse)?.statusCode == 200, let token = j["token"] as? String, let fp = pin.seen else {
-                return .failure(.other((j["error"] as? String) ?? "The server didn’t accept the code."))
-            }
-            return .success(Paired(token: token, fingerprint: fp, host: j["host"] as? String ?? host))
-        } catch {
-            return .failure(problem(error, pinned: nil))
-        }
+        }.value
     }
 
     /// One reading. Blocking (it's called off the main thread, like the SSH reading).
@@ -83,9 +87,11 @@ enum ServerEdition {
                 let force = words.dropFirst().first == "-9"
                 let pids = words.dropFirst(force ? 2 : 1).filter { Int($0) != nil }
                 return pids.isEmpty ? nil : Action(kind: "process", verb: "end", target: pids.joined(separator: " "), force: force)
+            case "systemctl" where words.count == 2 && words[1] == "poweroff":
+                return Action(kind: "power", verb: "off", target: "", force: false)
             case "systemctl" where words.count >= 3 && ["start", "stop", "restart"].contains(words[1]):
                 return Action(kind: "service", verb: words[1], target: words[2...].joined(separator: " "), force: false)
-            case "docker" where words.count == 3 && ["start", "stop", "restart"].contains(words[1]):
+            case "docker" where words.count == 3 && ["start", "stop", "restart", "unpause"].contains(words[1]):
                 return Action(kind: "container", verb: words[1], target: words[2], force: false)
             default:
                 return nil
@@ -95,32 +101,23 @@ enum ServerEdition {
 
     // MARK: Connection
 
-    static func tokenAccount(_ s: ServerConfig) -> String { "server-edition:" + s.id.uuidString }
-    static func saveToken(_ token: String, for s: ServerConfig) { Keychain.set(token, account: tokenAccount(s)) }
-    static func forget(_ s: ServerConfig) { Keychain.remove(account: tokenAccount(s)) }
-
-    private static func config() -> URLSessionConfiguration {
-        let c = URLSessionConfiguration.ephemeral
-        c.timeoutIntervalForRequest = 10
-        c.timeoutIntervalForResource = 30
-        c.urlCache = nil
-        c.httpCookieStorage = nil
-        return c
+    static func notPaired(_ s: ServerConfig) -> String {
+        "Apex isn’t paired with \(s.name) on this Mac. Use Pair Again with a code from `sudo apex-server pair` on the server."
     }
 
-    /// One session per server, pinned to the certificate it was paired with.
-    private static let sessions = SessionCache()
+    static func tokenAccount(_ s: ServerConfig) -> String { "server-edition:" + s.id.uuidString }
+    @discardableResult
+    static func saveToken(_ token: String, for s: ServerConfig) -> OSStatus { Keychain.set(token, account: tokenAccount(s)) }
+    static func forget(_ s: ServerConfig) { Keychain.remove(account: tokenAccount(s)) }
 
-    private final class SessionCache: @unchecked Sendable {
-        private var map: [String: URLSession] = [:]
+    /// What each server showed last (its certificate, and its key), by the
+    /// certificate it was paired with: for keeping up with a renewal.
+    private static let lastSeen = SeenCache()
+    private final class SeenCache: @unchecked Sendable {
+        private var map: [String: (String, String?)] = [:]
         private let lock = NSLock()
-        func session(for fingerprint: String) -> URLSession {
-            lock.lock(); defer { lock.unlock() }
-            if let s = map[fingerprint] { return s }
-            let s = URLSession(configuration: ServerEdition.config(), delegate: PinDelegate(expected: fingerprint), delegateQueue: nil)
-            map[fingerprint] = s
-            return s
-        }
+        func set(_ pinned: String, _ v: (String, String?)) { lock.lock(); map[pinned] = v; lock.unlock() }
+        func get(_ pinned: String) -> (String, String?)? { lock.lock(); defer { lock.unlock() }; return map[pinned] }
     }
 
     static func url(_ host: String, _ port: Int, _ path: String) -> URL? {
@@ -130,52 +127,48 @@ enum ServerEdition {
         c.scheme = "https"
         c.host = h.contains(":") && !h.hasPrefix("[") ? "[\(h)]" : h      // IPv6 needs brackets
         c.port = port
-        c.path = path
+        let parts = path.split(separator: "?", maxSplits: 1)       // "/api/proxies?fresh=1": the query isn't part of the path
+        c.path = String(parts.first ?? "")
+        if parts.count > 1 { c.percentEncodedQuery = String(parts[1]) }
         return c.url
     }
 
-    private static func request(_ s: ServerConfig, _ path: String, body: [String: Any]?) -> Result<Data, ServerError> {
-        guard let fp = s.fingerprint, let token = Keychain.get(account: tokenAccount(s)) else {
-            return .failure(.other("Apex isn’t paired with \(s.name). Edit it and pair it again with the code from `sudo apex-server pair`."))
+    static func request(_ s: ServerConfig, _ path: String, body: [String: Any]?, long: Bool = false) -> Result<Data, ServerError> {
+        guard let fp = s.fingerprint else { return .failure(.other(notPaired(s))) }
+        let saved = Keychain.read(account: tokenAccount(s))
+        guard let token = saved.value else {
+            if saved.status == errSecItemNotFound { return .failure(.other(notPaired(s))) }
+            return .failure(.other("This copy of Apex can’t open the pairing saved for \(s.name) (macOS: \(Keychain.describe(saved.status))). It was most likely saved by another copy of Apex on this Mac. Use Pair Again with a code from `sudo apex-server pair`."))
         }
-        guard let u = url(s.host, s.port, path) else { return .failure(.other("That address doesn’t look right.")) }
-        var req = URLRequest(url: u)
-        req.setValue("Bearer " + token, forHTTPHeaderField: "Authorization")
+        guard url(s.host, s.port, path) != nil else { return .failure(.other("That address doesn’t look right.")) }
+        var headers = ["Authorization": "Bearer " + token]
+        var data: Data?
         if let body {
-            req.httpMethod = "POST"
-            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+            headers["Content-Type"] = "application/json"
+            data = try? JSONSerialization.data(withJSONObject: body)
         }
-        let box = ResultBox()
-        let sem = DispatchSemaphore(value: 0)
-        sessions.session(for: fp).dataTask(with: req) { d, r, e in
-            if let e { box.value = .failure(problem(e, pinned: fp)) }
-            else if let code = (r as? HTTPURLResponse)?.statusCode, code == 401 {
-                box.value = .failure(.other("\(s.name) doesn’t know this Mac any more (it was unpaired). Edit it and pair it again."))
-            } else if let d, (r as? HTTPURLResponse)?.statusCode == 200 { box.value = .success(d) }
-            else { box.value = .failure(.other("The server answered with an error (\((r as? HTTPURLResponse)?.statusCode ?? 0)).")) }
-            sem.signal()
-        }.resume()
-        if sem.wait(timeout: .now() + 35) == .timedOut { return .failure(.unreachable) }
-        return box.value ?? .failure(.unreachable)
+        switch PinnedHTTP.send(host: s.host, port: s.port, method: body == nil ? "GET" : "POST", path: path, headers: headers, body: data,
+                               expected: fp, expectedKey: s.keyPin, timeout: long ? 900 : 30) {
+        case .failure(let f): return .failure(problem(f, pinned: true))
+        case .success(let r):
+            lastSeen.set(fp, (r.fingerprint, r.key))
+            if r.status == 401 { return .failure(.other("\(s.name) doesn’t know this Mac any more (it was unpaired). Use Pair Again.")) }
+            guard r.status == 200 else { return .failure(.other("The server answered with an error (\(r.status)).")) }
+            return .success(r.body)
+        }
     }
 
-    private final class ResultBox: @unchecked Sendable { var value: Result<Data, ServerError>? }
-
-    /// URL errors in plain words. Pure: tested.
-    static func problem(_ error: Error, pinned: String?) -> ServerError {
-        let e = error as NSError
-        switch e.code {
-        case NSURLErrorCancelled where pinned != nil, NSURLErrorServerCertificateUntrusted, NSURLErrorSecureConnectionFailed:
-            return .other("This server’s certificate isn’t the one Apex paired with. If Apex Server Edition was reinstalled there, pair again; otherwise something may be standing in for the server.")
-        case NSURLErrorCannotConnectToHost:
+    /// Connection problems in plain words. Pure: tested.
+    static func problem(_ f: PinnedHTTP.Failure, pinned: Bool) -> ServerError {
+        switch f {
+        case .wrongCertificate:
+            return .other("This server’s certificate isn’t the one Apex paired with. If Apex Server Edition was reinstalled there, use Pair Again; otherwise something may be standing in for the server.")
+        case .refused:
             return .other("Nothing is answering on that port. Is Apex Server Edition running there (sudo apex-server status), and is the port open in its firewall?")
-        case NSURLErrorTimedOut, NSURLErrorNetworkConnectionLost, NSURLErrorNotConnectedToInternet:
-            return .unreachable
-        case NSURLErrorCannotFindHost, NSURLErrorDNSLookupFailed:
-            return .hostUnknown
-        default:
-            return .other(e.localizedDescription)
+        case .unreachable: return .unreachable
+        case .hostUnknown: return .hostUnknown
+        case .badAnswer: return .other("The server’s answer was cut off or not understood. Try again.")
+        case .other(let m): return .other(m)
         }
     }
 
@@ -184,24 +177,20 @@ enum ServerEdition {
         SHA256.hash(data: der).map { String(format: "%02X", $0) }.joined(separator: ":")
     }
 
-    /// Accepts the server's certificate only if it's the paired one (or, when
-    /// pairing, notes which one it is).
-    final class PinDelegate: NSObject, URLSessionDelegate, @unchecked Sendable {
-        let expected: String?
-        var seen: String?
-        init(expected: String?) { self.expected = expected }
+    /// What the server showed last, for saving a renewed certificate or a key
+    /// pin learned from a server paired before 1.1.
+    static func seen(_ s: ServerConfig) -> (fingerprint: String?, key: String?) {
+        guard let fp = s.fingerprint, let v = lastSeen.get(fp) else { return (nil, nil) }
+        return (v.0, v.1)
+    }
 
-        func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
-                        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
-            guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
-                  let trust = challenge.protectionSpace.serverTrust,
-                  let leaf = (SecTrustCopyCertificateChain(trust) as? [SecCertificate])?.first else {
-                completionHandler(.cancelAuthenticationChallenge, nil); return
-            }
-            let fp = ServerEdition.fingerprint(SecCertificateCopyData(leaf) as Data)
-            seen = fp
-            if expected == nil || expected == fp { completionHandler(.useCredential, URLCredential(trust: trust)) }
-            else { completionHandler(.cancelAuthenticationChallenge, nil) }
-        }
+    /// SHA-256 of the certificate's public key (SubjectPublicKeyInfo), as the
+    /// server prints it. Server Edition's keys are EC P-256. Pure: tested.
+    static func keyFingerprint(_ cert: SecCertificate) -> String? {
+        guard let key = SecCertificateCopyKey(cert), let point = SecKeyCopyExternalRepresentation(key, nil) as Data?,
+              point.count == 65 else { return nil }
+        let header: [UInt8] = [0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01,
+                               0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00]
+        return fingerprint(Data(header) + point)
     }
 }

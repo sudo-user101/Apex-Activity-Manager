@@ -1,0 +1,90 @@
+{
+  "proxies": [
+    {
+      "kind": "nginx",
+      "name": "nginx/1.24.0 (Ubuntu)",
+      "running": true,
+      "editable": true
+    }
+  ],
+  "sites": [
+    {
+      "id": "nginx:/etc/nginx/sites-enabled/default#(any name)",
+      "proxy": "nginx",
+      "domains": [
+        "(any name)"
+      ],
+      "targets": [
+        "Files in /var/www/html"
+      ],
+      "https": false,
+      "enabled": true,
+      "managed": false,
+      "canToggle": true,
+      "file": "/etc/nginx/sites-enabled/default",
+      "trafficNote": "This site has no access log of its own, so its traffic can't be told apart."
+    },
+    {
+      "id": "nginx:/etc/nginx/sites-enabled/apex-app.test.conf#app.test",
+      "proxy": "nginx",
+      "domains": [
+        "app.test"
+      ],
+      "targets": [
+        "http://127.0.0.1:3000"
+      ],
+      "https": false,
+      "enabled": true,
+      "managed": true,
+      "canToggle": true,
+      "file": "/etc/nginx/sites-enabled/apex-app.test.conf",
+      "spec": {
+        "domains": [
+          "app.test"
+        ],
+        "upstream": "http://127.0.0.1:3000",
+        "https": false,
+        "websockets": false
+      },
+      "traffic": {
+        "requests": 35,
+        "window": 600,
+        "perMinute": 3.5,
+        "bytes": 11409,
+        "statuses": {
+          "2xx": 1,
+          "4xx": 34
+        },
+        "topPaths": [
+          {
+            "value": "/p1",
+            "count": 8
+          },
+          {
+            "value": "/p2",
+            "count": 8
+          },
+          {
+            "value": "/p0",
+            "count": 7
+          },
+          {
+            "value": "/p3",
+            "count": 7
+          },
+          {
+            "value": "/",
+            "count": 1
+          }
+        ],
+        "topClients": [
+          {
+            "value": "127.0.0.1",
+            "count": 35
+          }
+        ]
+      }
+    }
+  ],
+  "taken": 1793269909795
+}

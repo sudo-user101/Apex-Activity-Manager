@@ -23,6 +23,8 @@ final class FloatingShelf {
     private var itemsAtShow = 0
     private var dropsAtShow = 0
     private var fileDrag = false
+    /// This drag started in an app the person excluded: no shelf for it.
+    private var excludedDrag = false
     private var shakeX = ShakeDetector()
     private var shakeY = ShakeDetector()
     /// Bumped on every show, so a fade-out or delayed hide that started
@@ -73,6 +75,7 @@ final class FloatingShelf {
     private func mouseDown() {
         baseline = NSPasteboard(name: .drag).changeCount
         fileDrag = false
+        excludedDrag = false
         shakeX.reset(); shakeY.reset()
     }
 
@@ -82,7 +85,11 @@ final class FloatingShelf {
             // Anything a shelf can keep: files, promised files (Photos, Mail), pictures, links, text.
             guard pb.changeCount != baseline, ShelfDrop.canAccept(pb) else { return }
             fileDrag = true
+            // Dragging inside an app on the "never open" list (e.g. a photo editor): leave it alone.
+            excludedDrag = ShelfTrigger.excluded(NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+                                                 UserDefaults.standard.stringArray(forKey: ShelfTrigger.excludedKey) ?? [])
         }
+        if excludedDrag { return }
         let point = NSEvent.mouseLocation
         // Wiggling the file starts a new, empty shelf right here: the old one's
         // items move to Recent shelves, even if it was showing or tucked away.
@@ -95,8 +102,10 @@ final class FloatingShelf {
             return
         }
         // By default only a shake opens the shelf, so moving files around
-        // doesn't bring it up; Settings can open it on every drag instead.
-        guard UserDefaults.standard.bool(forKey: "shelfOnAnyDrag") else { return }
+        // doesn't bring it up; Settings can open it on every drag instead, or
+        // while a key is held during the drag.
+        let keyHeld = ShelfTrigger.keyHeld(UserDefaults.standard.string(forKey: ShelfTrigger.keyKey) ?? "", flags: NSEvent.modifierFlags)
+        guard UserDefaults.standard.bool(forKey: "shelfOnAnyDrag") || keyHeld else { return }
         guard !shownForDrag else { return }
         // Already up (or tucked at the edge): leave it; dragging onto the handle brings it out.
         if panel?.isVisible == true { return }
@@ -160,6 +169,13 @@ final class FloatingShelf {
         }
     }
 
+    /// The keyboard shortcut: shows the shelf by the pointer, or hides it if it's showing.
+    func toggleFromShortcut() {
+        guard enabled else { return }
+        if let p = panel, p.isVisible, p.alphaValue > 0.5, !state.docked { close(); return }
+        show(near: NSEvent.mouseLocation)
+    }
+
     /// Quick start, gentle landing (the curve macOS uses for popovers).
     private static let settle = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.25, 1)
 
@@ -198,24 +214,24 @@ final class FloatingShelf {
     func owns(_ window: NSWindow?) -> Bool { window != nil && window === panel }
 
     /// Files from the shelf were dropped into another app or a folder: the
-    /// shelf shrinks into Apex's menu bar item and is kept in the menu bar's
-    /// Shelf tab. Core Animation scales the content (no relayout) while the
+    /// shelf shrinks into Apex's menu bar item and closes (into Recently
+    /// closed); it isn't kept in the menu bar, only the user puts things there. Core Animation scales the content (no relayout) while the
     /// panel glides there; the panel never takes focus, so it stays smooth
     /// whichever app is in front or comes forward meanwhile. Without Apex in
     /// the menu bar it goes to the side; with Reduce Motion it just fades.
     func tuckIntoMenuBar() {
         guard let p = panel, p.isVisible, !moving, let content = p.contentView else { return }
         guard let target = StatusBar.shared.itemFrame else {
-            minimize { ShelfStore.shared.tuckAway(menuBar: false) }
+            minimize { ShelfStore.shared.finishAfterDrop() }
             return
         }
         if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
-            minimize { ShelfStore.shared.tuckAway(menuBar: true) }
+            minimize { ShelfStore.shared.finishAfterDrop() }
             StatusBar.shared.bounce()
             return
         }
         content.wantsLayer = true
-        guard let layer = content.layer else { minimize { ShelfStore.shared.tuckAway(menuBar: true) }; return }
+        guard let layer = content.layer else { minimize { ShelfStore.shared.finishAfterDrop() }; return }
         let gen = generation
         moving = true
         p.hasShadow = false                     // the shadow wouldn't shrink with the content
@@ -257,7 +273,7 @@ final class FloatingShelf {
                 p.level = .floating
                 (p as? KeyablePanel)?.unconstrained = false
                 s.moving = false
-                ShelfStore.shared.tuckAway(menuBar: true)
+                ShelfStore.shared.finishAfterDrop()
                 s.updateSideHandle()
                 StatusBar.shared.bounce()
             }
@@ -463,6 +479,33 @@ final class KeyablePanel: NSPanel {
 /// Spots a shake along one axis: the pointer changing direction 3 times,
 /// each stroke at least 40 pt, within 0.7 s. Re-aiming at a folder, small
 /// jitters and slow back-and-forth don't count; a stroke can run on as far
+/// When the shelf opens during a drag, besides a shake. Pure: tested.
+enum ShelfTrigger {
+    /// UserDefaults: the key that opens the shelf while dragging ("" = none;
+    /// "shift", "control", "option", "command") and the apps where it never opens.
+    static let keyKey = "shelfKey"
+    static let excludedKey = "shelfExcludedApps"
+
+    static let keys: [(id: String, name: String)] = [("", "No key"), ("shift", "⇧ Shift"), ("control", "⌃ Control"),
+                                                     ("option", "⌥ Option"), ("command", "⌘ Command")]
+
+    static func keyHeld(_ key: String, flags: NSEvent.ModifierFlags) -> Bool {
+        let f = flags.intersection(.deviceIndependentFlagsMask)
+        switch key {
+        case "shift": return f.contains(.shift)
+        case "control": return f.contains(.control)
+        case "option": return f.contains(.option)
+        case "command": return f.contains(.command)
+        default: return false
+        }
+    }
+
+    static func excluded(_ bundle: String?, _ list: [String]) -> Bool {
+        guard let bundle else { return false }
+        return list.contains { $0.caseInsensitiveCompare(bundle) == .orderedSame }
+    }
+}
+
 /// as it likes before turning. Pure: tested.
 struct ShakeDetector {
     static let minStroke: CGFloat = 40

@@ -104,9 +104,7 @@ final class StatusBar: NSObject, NSPopoverDelegate {
         guard let button = item?.button else { return }
         let model = AppModel.shared
         let m = model.menuStats
-        let symbol = NSImage(systemSymbolName: "gauge.with.dots.needle.33percent", accessibilityDescription: "Apex")
-        symbol?.isTemplate = true
-        button.image = symbol
+        button.image = StatusBarIcon.image      // a line sketch of the app icon
         let text: String
         switch model.menuBarStyle {
         case "cpu": text = "\(m.cpu)%"
