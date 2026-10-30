@@ -302,6 +302,8 @@ struct RemotePage: View {
                 SitesView(serverID: id)
             } else if section == .docker, store.config(id) != nil {
                 DockerView(serverID: id)
+            } else if section == .manage, let s = store.config(id) {
+                ManageView(server: s)
             } else if let s = store.config(id) {
                 switch section {
                 case .processes: RemoteProcessesView(server: s)
@@ -784,7 +786,9 @@ struct ServerEditor: View {
         guard !host.isEmpty, ServerConfig.isSafe(host.trimmingCharacters(in: .whitespaces)) else { return false }
         if !edition { return true }
         if paired != nil { return true }
-        if let s = server, s.isEdition, s.host == host.trimmingCharacters(in: .whitespaces), String(s.port) == port { return true }
+        // Already paired at this address: a new port (the server moved) keeps the pairing;
+        // its certificate is still checked on every connection.
+        if let s = server, s.isEdition, s.host == host.trimmingCharacters(in: .whitespaces), Int(port).map({ $0 > 0 && $0 < 65536 }) == true { return true }
         return false
     }
 

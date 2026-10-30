@@ -276,9 +276,17 @@ this Mac, its websites and its Docker containers. Pair a server with
   where it forwards, when its certificate ends and its traffic. Add, edit
   and switch sites off; each change is checked by the proxy and undone if
   it's refused.
+- **Manage:** a root terminal, files, updates and security (firewall,
+  fail2ban, SSH, users and keys) for each server, like a hosting control
+  panel. Switched on at the server with `sudo apex-server allow panel`.
 - **Docker Management:** containers by stack and the manager running them
   (Dockge, Portainer, Compose), logs, updates, compose files, images,
   volumes and networks.
+
+<p align="center">
+  <img src="docs/images/server-terminal.png" width="49%" alt="Manage › Terminal: htop running full screen in Apex's own terminal on a server" />
+  <img src="docs/images/server-security.png" width="49%" alt="Manage › Security: the firewall, fail2ban, SSH sign-in settings and users with their SSH keys" />
+</p>
 
 <p align="center">
   <img src="docs/images/server-sites.png" width="49%" alt="Sites: four websites with where they forward, certificate days left and traffic, one certificate ending soon" />
@@ -290,7 +298,7 @@ this Mac, its websites and its Docker containers. Pair a server with
 1. Download the latest **.dmg** from
    [Releases](https://github.com/sudo-user101/Apex-Activity-Manager-MacOSX/releases/latest).
 2. Open it and drag **Apex Activity Manager** onto **Applications**.
-3. Version 1.4.0 isn't notarized: the first time, macOS may say it can't check
+3. Version 1.5.0 isn't notarized: the first time, macOS may say it can't check
    the app. Open **System Settings › Privacy & Security** and click
    **Open Anyway**. Releases signed with Developer ID and notarized by Apple
    open normally.

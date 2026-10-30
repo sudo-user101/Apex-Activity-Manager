@@ -149,6 +149,8 @@ enum ServerEdition {
         }
         switch PinnedHTTP.send(host: s.host, port: s.port, method: body == nil ? "GET" : "POST", path: path, headers: headers, body: data,
                                expected: fp, expectedKey: s.keyPin, timeout: long ? 900 : 30) {
+        case .failure(.refused):
+            return .failure(.other("Nothing is answering on port \(s.port) at \(s.host). Is Apex Server Edition running there (sudo apex-server status)? If it was moved to another port (install.sh --port), edit \(s.name) and change its port; the pairing is kept."))
         case .failure(let f): return .failure(problem(f, pinned: true))
         case .success(let r):
             lastSeen.set(fp, (r.fingerprint, r.key))

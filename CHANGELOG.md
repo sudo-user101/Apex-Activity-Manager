@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.5.0 (2026-10-30)
+
+- **Manage** (a server with Apex Server Edition 1.2): a control panel for
+  the server, as root.
+  - **Terminal:** a root shell, drawn by Apex's own terminal (colours,
+    full-screen programs like htop, nano and vim, scrollback, copy and
+    paste).
+  - **Files:** browse anywhere, edit text files, upload and download,
+    rename, delete, permissions and owner.
+  - **Updates:** security updates first; install all, security only or
+    selected; install or remove a package; restart when needed.
+  - **Security:** firewall rules (ufw or firewalld; SSH and Apex are kept
+    open), fail2ban, SSH sign-in settings, users and their SSH keys.
+  - Off until it's switched on at the server: `sudo apex-server allow panel`.
+- **Moving a server to another port** keeps its pairing; the message says
+  which port Apex tried.
+- **Sites:** Nginx Proxy Manager sites show where they forward.
+
 ## 1.4.0 (2026-10-29)
 
 - **All Servers:** every server added up (CPU weighted by cores, memory,
